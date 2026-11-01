@@ -49,12 +49,51 @@ describe("subagent_model delegation", () => {
         prompt: [{ type: "text", text: "Review the staged diff." }],
         parent: agent,
         agentOptions: { provider: "openai-codex", model: "gpt-5.6-sol", reasoningEffort: "high" },
+        maxDepth: 1,
         cwd: "/tmp/work"
       },
       signal,
       delivery: "parent"
     }]);
+    expect(subagents.calls.resolveMaxDepth).toBe(1);
+  });
+
+  it("forwards the Host depth limit, not a plugin-local cap", async () => {
+    const subagents = createSubagents({ maxDepth: 4 });
+    const { tool, agent } = setup({ subagents });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].request.maxDepth).toBe(4);
+  });
+
+  it("omits the depth limit when the Host delegates it to the provider", async () => {
+    const subagents = createSubagents({ maxDepth: undefined });
+    const { tool, agent } = setup({ subagents });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
     expect(subagents.calls.startActivation[0].request).not.toHaveProperty("maxDepth");
+  });
+
+  it("fails loud when the spawn backend is not mounted", async () => {
+    const subagents = createSubagents({ providerRegistered: false });
+    const { tool, agent } = setup({ subagents });
+
+    await expect(tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent })))
+      .rejects.toThrow('subagent backend "spawn" is not registered in this composition');
+    expect(subagents.calls.startActivation).toHaveLength(0);
+    expect(subagents.calls.getProvider).toEqual(["spawn"]);
+  });
+
+  it("fails loud on a host without managed activations", async () => {
+    const tool = createDelegationTool({
+      llm: createLlm(),
+      subagents: { getProvider: () => ({ name: "spawn" }), resolveMaxDepth: () => 1 }
+    });
+
+    await expect(tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent: createAgent() })))
+      .rejects.toThrow("subagent_model requires managed activations");
   });
 
   it("defaults the provider to the calling agent's live route", async () => {

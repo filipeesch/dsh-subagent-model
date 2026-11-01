@@ -36,8 +36,9 @@ Starts one managed subagent activation on an explicitly selected route.
 
 The call returns `{ kind: "activation", subagentId }` immediately. The child's answer arrives
 later as a completion notice in the parent conversation; use `send_message` to steer a running
-child or to continue it after it settles. Delegation depth follows the Host's subagent depth
-setting — the plugin applies no cap of its own.
+child or to continue it after it settles. Delegation depth is the Host's resolved limit
+(`ctx.subagents.resolveMaxDepth()`), forwarded with each request; the plugin applies no cap of its
+own.
 
 ## Difference from the native delegation tool
 
@@ -51,7 +52,7 @@ catalog keeps its own name and scope.
 
 ## Requirements
 
-- DSH `>=0.2.1-alpha.1 <0.3.0` (the release line that introduced managed activations and
+- DSH `>=0.2.1-alpha.2 <0.3.0` (the release that introduced managed activations and
   `ctx.subagents.startActivation`). The manifest declares this range through `engines.dsh`, so an
   incompatible profile refuses the bundle at install time.
 - Node 24 for the test lanes only; the plugin itself runs inside the host runtime.

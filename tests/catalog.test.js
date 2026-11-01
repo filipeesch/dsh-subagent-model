@@ -79,14 +79,17 @@ describe("list_subagent_routes results", () => {
       .resolves.toBe("(no advertised models for openai-codex)");
   });
 
-  it("lists routes the Session does not authorize", async () => {
-    const llm = createLlm({ providers, models });
-    llm.authorizedRoutes = [{ provider: "deepseek-official", model: "deepseek-pro" }];
+  it("reads no Session route policy when listing models", async () => {
+    const policyKeys = new Set(["authorizedRoutes", "allowedRoutes", "sessionRoutes", "policy"]);
+    const llm = new Proxy(createLlm({ providers, models }), {
+      get(target, property, receiver) {
+        if (policyKeys.has(property)) throw new Error("unexpected policy read: " + String(property));
+        return Reflect.get(target, property, receiver);
+      }
+    });
 
-    const text = await run(llm, { provider: "deepseek-official" });
-
-    expect(text).toContain("deepseek-flash");
-    expect(text).toContain("deepseek-pro");
+    await expect(run(llm, { provider: "deepseek-official" })).resolves.toContain("deepseek-flash");
+    await expect(run(llm, { provider: "deepseek-official" })).resolves.toContain("deepseek-pro");
   });
 
   it("reports a model and marks its default reasoning effort", async () => {

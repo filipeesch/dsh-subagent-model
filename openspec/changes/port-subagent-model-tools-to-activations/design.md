@@ -83,8 +83,10 @@ The plugin validates that the provider resolves the model and nothing more.
 
 ### Delegation depth from the Host
 
-`maxDepth` is omitted from the request so `ctx.subagents.resolveMaxDepth()` applies the Host
-setting (default `1`) instead of the plugin's hard-coded `3`.
+`maxDepth` is resolved through `ctx.subagents.resolveMaxDepth()` and forwarded in the request. The
+host only caps what the request carries, so omitting the field would leave delegation unbounded; the
+plugin therefore reads the Host setting (default `1`, or a provider-managed `undefined`) instead of
+applying its former hard-coded `3`.
 
 ### Module split with injected dependencies
 
@@ -114,11 +116,11 @@ Each factory takes the services it uses, so tests inject fakes and no module rea
 - Smoke: a throwaway `$DSH_HOME`, a profile cloned from the `headless` template, the plugin added
   with `dsh plugin add link:<repo>`, `DEEPSEEK_BASE_URL` pointing at a local Messages-API stub, and
   one headless turn whose scripted tool call is `list_subagent_routes`. Asserts the persisted
-  system prompt names both tools once and that the tool result is recorded.
+  recorded request header names both tools once and that the tool result is recorded.
 
 ### Package metadata
 
-`engines.dsh` is `>=0.2.1-alpha.1 <0.3.0` (the release that introduced `startActivation`), the
+`engines.dsh` is `>=0.2.1-alpha.2 <0.3.0` (the release that introduced `startActivation`), the
 version becomes `0.2.0` for the renamed tool and removed parameter, and `files` ships `index.js`,
 `lib/`, `cordis.patch.yml`, and `README.md`.
 
@@ -134,7 +136,7 @@ version becomes `0.2.0` for the renamed tool and removed parameter, and `files` 
 - [Free choice can bypass the Session route policy] → Deliberate and documented in the README, with
   the native tool named as the policy-respecting option.
 - [The Messages-API stub must track the adapter's SSE shape] → Keep the stub minimal and assert only
-  the persisted system prompt plus the tool result; if the adapter shape changes, the failure is
+  the recorded request header plus the tool result; if the adapter shape changes, the failure is
   local to the smoke script.
 - [Native shadowing rules may change] → The plugin never registers a native-owned name, so shadowing
   cannot turn into a load failure.

@@ -16,8 +16,9 @@
   wires them. Pass services into factories instead of reading module-level state.
 - Never register a name the host owns: `subagent`, `subagent_fork`, and `list_subagent_models`
   belong to `@deepseek-ai/dsh-tool-subagent`. The plugin's own catalog is `list_subagent_routes`.
-- Delegation uses managed activations with `delivery: 'parent'` and leaves `maxDepth` unset so the
-  Host setting governs recursion.
+- Delegation uses managed activations with `delivery: 'parent'` and forwards the Host's resolved
+  depth limit (`ctx.subagents.resolveMaxDepth()`, omitting the field only when the Host delegates
+  depth to the provider). Never add a plugin-local cap.
 - Fail loud with actionable messages that name the requested value and the known alternatives.
 
 ## Verification

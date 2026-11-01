@@ -55,14 +55,27 @@ export function createLlm({ providers = [], models = {}, details = {}, resolveCa
 
 /**
  * Build a subagent runtime double that records every activation spec.
- * @param {{ childId?: (index: number) => string }} [options] - child identity factory.
+ * @param {object} [options] - child identity, depth policy, and backend availability.
+ * @param {(index: number) => string} [options.childId] - child identity factory.
+ * @param {number|undefined} [options.maxDepth] - resolved Host depth limit.
+ * @param {boolean} [options.providerRegistered] - whether the spawn backend is mounted.
  * @returns {object} subagent runtime double with recorded calls.
  */
-export function createSubagents({ childId } = {}) {
-  const calls = { startActivation: [] };
+export function createSubagents(options = {}) {
+  const { childId, providerRegistered = true } = options;
+  const maxDepth = "maxDepth" in options ? options.maxDepth : 1;
+  const calls = { startActivation: [], resolveMaxDepth: 0, getProvider: [] };
   const nextChildId = childId ?? ((index) => "child-" + index);
   return {
     calls,
+    getProvider(name) {
+      calls.getProvider.push(name);
+      return providerRegistered ? { name } : undefined;
+    },
+    resolveMaxDepth() {
+      calls.resolveMaxDepth += 1;
+      return maxDepth;
+    },
     async startActivation(spec) {
       calls.startActivation.push(spec);
       return { childId: nextChildId(calls.startActivation.length) };

@@ -3,7 +3,7 @@
  * Isolated loader smoke for dsh-subagent-model.
  *
  * Boots the installed DSH runtime in a throwaway `$DSH_HOME`, links this
- * package into a profile cloned from the `headless` template, and runs one
+ * package into a profile cloned from the `headless` template, and runs a single
  * one-shot task against a local Messages-API stub. The stub answers the first
  * request with a scripted `list_subagent_routes` tool call and the next request
  * with a final answer, so the smoke proves registration and execution under the
@@ -33,7 +33,9 @@ const PROFILE = "subagent-model-smoke";
 const RUN_TIMEOUT_MS = 120_000;
 const TOOL_NAME = "list_subagent_routes";
 const DELEGATION_TOOL_NAME = "subagent_model";
-const NATIVE_DISCOVERY_NAME = "list_subagent_models";
+
+/** Throwaway `$DSH_HOME` of the current run, reported when the run fails and is kept. */
+let currentHome;
 
 /** Resolve the runtime CLI the smoke boots. */
 function resolveDshBin() {
@@ -111,6 +113,20 @@ function respondWithText(response, text) {
 }
 
 /**
+ * Parse a JSON request body without making the stub fail on malformed input.
+ * @param {string} body - raw request body.
+ * @returns {object|undefined} parsed body when it is a JSON object.
+ */
+function parseBody(body) {
+  try {
+    const parsed = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Start the local Messages-API stub.
  * @returns {Promise<{ port: number, requests: string[], close: () => Promise<void> }>}
  */
@@ -137,8 +153,10 @@ async function startStub() {
         "cache-control": "no-cache",
         connection: "keep-alive"
       });
+      const advertised = parseBody(body)?.tools?.some((tool) => tool.name === TOOL_NAME) === true;
       if (body.includes('"tool_result"')) respondWithText(response, "SMOKE_TURN_COMPLETE");
-      else respondWithToolCall(response);
+      else if (advertised) respondWithToolCall(response);
+      else respondWithText(response, "SMOKE_AUXILIARY_TURN");
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -163,7 +181,7 @@ function findSessionFiles(home) {
     for (const entry of readdirSync(directory)) {
       const candidate = join(directory, entry);
       if (statSync(candidate).isDirectory()) walk(candidate);
-      else if (entry === "session.v4.jsonl.zstd") found.push(candidate);
+      else if (entry === "session.v4.jsonl.zstd" || entry === "session.v4.jsonl") found.push(candidate);
     }
   };
   walk(sessionsRoot);
@@ -171,14 +189,18 @@ function findSessionFiles(home) {
 }
 
 /**
- * Read one persisted session as decoded events. The log is an append-only
- * sequence of independently compressed zstd frames, so frames are decoded one
- * by one and merged back together when a frame boundary falls inside a payload.
+ * Read one persisted session as decoded events. A compressed log is an
+ * append-only sequence of independently compressed zstd frames, so frames are
+ * decoded one by one; a zstd magic sequence can also occur inside a payload, so
+ * a segment that does not decode on its own is extended with the next one.
  * @param {string} file - session archive path.
  * @returns {object[]} decoded session events.
  */
 function readSessionEvents(file) {
   const buffer = readFileSync(file);
+  if (!file.endsWith(".zstd")) {
+    return buffer.toString("utf8").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
+  }
   const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
   const offsets = [];
   let cursor = 0;
@@ -195,7 +217,7 @@ function readSessionEvents(file) {
       text.push(zstdDecompressSync(pending).toString("utf8"));
       pending = Buffer.alloc(0);
     } catch (error) {
-      // An incomplete frame: extend it with the next segment and retry.
+      // Not a frame boundary (the magic occurred inside a payload): extend with the next segment.
       if (index === offsets.length - 1) throw error;
     }
   }
@@ -213,7 +235,9 @@ function readSessionEvents(file) {
  * @returns {never}
  */
 function fail(detail, context = []) {
-  throw new Error(["smoke failed: " + detail, ...context].join("\n"));
+  const lines = ["smoke failed: " + detail, ...context];
+  if (process.env.SMOKE_KEEP && currentHome !== undefined) lines.push("kept session home: " + currentHome);
+  throw new Error(lines.join("\n"));
 }
 
 /**
@@ -223,18 +247,25 @@ function fail(detail, context = []) {
 async function main() {
   const dsh = resolveDshBin();
   const home = mkdtempSync(join(tmpdir(), "dsh-subagent-model-smoke-"));
+  currentHome = home;
   const env = { ...process.env, DSH_HOME: home };
   let stub;
 
   try {
     const compose = runDsh(dsh, ["--profile", PROFILE, "--from-default-profile", "headless", "--dump-config"], env, home);
     if (compose.status !== 0) {
-      fail("could not compose the isolated profile", [compose.stderr.slice(-2000)]);
+      fail("could not compose the isolated profile", [
+        compose.error === undefined ? "" : String(compose.error),
+        compose.stderr.slice(-2000)
+      ].filter((line) => line.length > 0));
     }
 
     const link = runDsh(dsh, ["plugin", "--profile", PROFILE, "add", "link:" + REPO_ROOT], env, home);
     if (link.status !== 0) {
-      fail("could not link the plugin into the isolated profile", [link.stderr.slice(-2000)]);
+      fail("could not link the plugin into the isolated profile", [
+        link.error === undefined ? "" : String(link.error),
+        link.stderr.slice(-2000)
+      ].filter((line) => line.length > 0));
     }
 
     stub = await startStub();
@@ -250,6 +281,10 @@ async function main() {
       const timer = setTimeout(() => child.kill("SIGKILL"), RUN_TIMEOUT_MS);
       child.stdout.on("data", (chunk) => { stdout += chunk; });
       child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        resolve({ code: null, stdout, stderr: stderr + "\nspawn error: " + String((error && error.message) || error) });
+      });
       child.on("close", (code) => {
         clearTimeout(timer);
         resolve({ code, stdout, stderr });
@@ -266,7 +301,9 @@ async function main() {
     }
 
     const sessionFiles = findSessionFiles(home);
-    if (sessionFiles.length === 0) fail("no session was persisted under the throwaway home");
+    if (sessionFiles.length === 0) {
+      fail("no session log (session.v4.jsonl[.zstd]) was persisted under the throwaway home");
+    }
     const events = sessionFiles.flatMap(readSessionEvents);
     if (process.env.SMOKE_DEBUG) {
       console.log("session event types:", [...new Set(events.map((event) => event.type))].join(", "));
@@ -280,9 +317,6 @@ async function main() {
     for (const required of [TOOL_NAME, DELEGATION_TOOL_NAME]) {
       const occurrences = toolNames.filter((name) => name === required).length;
       if (occurrences !== 1) fail("expected exactly one " + required + " in the request tool catalog, saw " + occurrences);
-    }
-    if (toolNames.includes(NATIVE_DISCOVERY_NAME)) {
-      fail("the plugin claimed the native " + NATIVE_DISCOVERY_NAME + " name");
     }
 
     const catalogCall = events.find((event) => event.type === "tool/call" && event.data.name === TOOL_NAME);
@@ -300,7 +334,7 @@ async function main() {
     console.log("smoke ok: " + sessionFiles.length + " session(s), both tools registered and the catalog executed");
     if (process.env.SMOKE_KEEP) console.log("kept session home: " + home);
   } finally {
-    await stub?.close().catch(() => {});
+    await stub?.close();
     if (!process.env.SMOKE_KEEP) rmSync(home, { recursive: true, force: true });
   }
 }

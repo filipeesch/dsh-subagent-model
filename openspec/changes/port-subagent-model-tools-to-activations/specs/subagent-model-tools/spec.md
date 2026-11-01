@@ -118,8 +118,9 @@ provider resolves the model.
 
 ### Requirement: Delegation depth follows the Host setting
 
-The plugin SHALL NOT impose its own delegation depth cap. Every delegation MUST use the Host's
-configured subagent depth limit so recursion stays governed in one place.
+The plugin SHALL NOT impose its own delegation depth cap. Every delegation MUST resolve the Host's
+configured subagent depth limit through the subagent service and forward it with the request, so
+recursion stays governed in one place.
 
 #### Scenario: Host default depth applies
 
@@ -152,7 +153,7 @@ removed when the plugin unloads.
 
 ### Requirement: Runs on current DSH releases without resolving DSH packages
 
-The plugin SHALL load and operate on DSH 0.2.1-alpha.1 and later using only the injected
+The plugin SHALL load and operate on DSH 0.2.1-alpha.2 and later using only the injected
 context services, without importing `@deepseek-ai` packages at runtime. The package manifest
 MUST declare the supported DSH release range so installation refuses incompatible hosts.
 

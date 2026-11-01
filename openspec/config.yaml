@@ -1,0 +1,42 @@
+schema: spec-driven
+
+context: |
+  Language: en-US
+  All artifacts must be written in en-US.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Project: dsh-subagent-model — a DeepSeek Harness (DSH) host-half plugin that
+  adds model-selection subagent delegation tools (`list_subagent_models`,
+  `subagent_model`).
+  Tech stack: Node ESM JavaScript with no runtime dependencies; a single
+  `index.js` entry plus `cordis.patch.yml` (the DSH bundle patch that inserts the
+  plugin), declared in `package.json` under `dsh.bundle`.
+  Domain: DSH host services (`ctx.tools`, `ctx.subagents`, `ctx.llm`), the
+  `@deepseek-ai/dsh-tool-subagent` package, and profile bundles installed with
+  `dsh plugin add link:<path>`.
+  Upstream reference: the DSH checkout at
+  /Users/filipe.esch/projects/pessoal/deepseek-harness (installed app version is
+  the same release line). Prefer replicating upstream package patterns
+  (typed seams, small modules, injected dependencies) over bespoke approaches.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

@@ -1,0 +1,19 @@
+{
+  "name": "dsh-subagent-model",
+  "version": "0.1.0",
+  "description": "Model-selection subagent delegation tools for DeepSeek Harness: list_subagent_models + subagent_model (per-call provider/model override).",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": ["dsh", "plugin", "subagent", "model"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "cordis.patch.yml"]
+}

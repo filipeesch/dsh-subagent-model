@@ -36,6 +36,7 @@ const DELEGATION_TOOL_NAME = "subagent_model";
 
 /** Throwaway `$DSH_HOME` of the current run, reported when the run fails and is kept. */
 let currentHome;
+let currentKeep = false;
 
 /** Resolve the runtime CLI the smoke boots. */
 function resolveDshBin() {
@@ -236,7 +237,7 @@ function readSessionEvents(file) {
  */
 function fail(detail, context = []) {
   const lines = ["smoke failed: " + detail, ...context];
-  if (process.env.SMOKE_KEEP && currentHome !== undefined) lines.push("kept session home: " + currentHome);
+  if (currentKeep && currentHome !== undefined) lines.push("kept session home: " + currentHome);
   throw new Error(lines.join("\n"));
 }
 
@@ -244,11 +245,14 @@ function fail(detail, context = []) {
  * Run the smoke.
  * @returns {Promise<void>}
  */
-async function main() {
+export async function runSmoke({ installSpec = "link:" + REPO_ROOT, onInstalled = () => {}, keep = Boolean(process.env.SMOKE_KEEP), isolatedEnvironment = false } = {}) {
   const dsh = resolveDshBin();
   const home = mkdtempSync(join(tmpdir(), "dsh-subagent-model-smoke-"));
   currentHome = home;
-  const env = { ...process.env, DSH_HOME: home };
+  currentKeep = keep;
+  const env = isolatedEnvironment
+    ? { PATH: process.env.PATH || "/usr/bin:/bin", HOME: home, DSH_HOME: home, GIT_TERMINAL_PROMPT: "0" }
+    : { ...process.env, DSH_HOME: home };
   let stub;
 
   try {
@@ -256,17 +260,21 @@ async function main() {
     if (compose.status !== 0) {
       fail("could not compose the isolated profile", [
         compose.error === undefined ? "" : String(compose.error),
-        compose.stderr.slice(-2000)
+        (compose.stderr ?? "").slice(-2000)
       ].filter((line) => line.length > 0));
     }
 
-    const link = runDsh(dsh, ["plugin", "--profile", PROFILE, "add", "link:" + REPO_ROOT], env, home);
-    if (link.status !== 0) {
-      fail("could not link the plugin into the isolated profile", [
-        link.error === undefined ? "" : String(link.error),
-        link.stderr.slice(-2000)
+    const installArgs = ["plugin", "--profile", PROFILE, "add", installSpec];
+    if (!installSpec.startsWith("link:")) installArgs.push("--ignore-scripts");
+    const install = runDsh(dsh, installArgs, env, home);
+    if (install.status !== 0) {
+      fail("could not install the plugin into the isolated profile", [
+        install.error === undefined ? "" : String(install.error),
+        (install.stdout ?? "").slice(-2000),
+        (install.stderr ?? "").slice(-2000)
       ].filter((line) => line.length > 0));
     }
+    await onInstalled({ home, profile: PROFILE });
 
     stub = await startStub();
     const runEnv = {
@@ -332,14 +340,16 @@ async function main() {
     if (!sessionText.includes(TOOL_NAME)) fail("the session log does not mention " + TOOL_NAME);
 
     console.log("smoke ok: " + sessionFiles.length + " session(s), both tools registered and the catalog executed");
-    if (process.env.SMOKE_KEEP) console.log("kept session home: " + home);
+    if (keep) console.log("kept session home: " + home);
   } finally {
     await stub?.close();
-    if (!process.env.SMOKE_KEEP) rmSync(home, { recursive: true, force: true });
+    if (!keep) rmSync(home, { recursive: true, force: true });
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  runSmoke().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -57,14 +57,33 @@ catalog keeps its own name and scope.
   incompatible profile refuses the bundle at install time.
 - Node 24 for the test lanes only; the plugin itself runs inside the host runtime.
 
-## Install
+## Install from GitHub
+
+1. In DSH, open **Plugins**, select the arrow next to **Add plugin**, and choose **Install a
+   third-party plugin**.
+2. Enter `https://github.com/filipeesch/dsh-subagent-model` and install it.
+3. Choose **Enable now** to request activation. Follow any restart notice and check that the
+   plugin is enabled and its tools are available. Closing the installer without enabling it leaves
+   the plugin installed but inactive.
+
+No local checkout is required. The URL without a reference uses the revision selected by DSH and
+its package manager. To request a specific revision, use a supported Git spec such as
+`git+https://github.com/filipeesch/dsh-subagent-model.git#<commit>`. The plugin does not impose a
+fixed version.
+
+Installation affects the connected DSH host and its current profile. If the host is remote, the
+plugin is installed on that host, not on the browser's computer. Install only repositories you trust:
+plugin code runs in the host process, and approved installation scripts can execute code. Follow
+DSH's own prompts and review any requested approvals.
+
+### Local checkout for development
 
 ```sh
 dsh plugin --profile <profile> add link:/path/to/dsh-subagent-model
 ```
 
 The bundle row is declared in `cordis.patch.yml`; nothing else in the profile needs to change.
-Restart the host after linking so the plugin reloads.
+Restart the host after linking so the plugin reloads. Keep the linked checkout available.
 
 ## Development
 
@@ -79,6 +98,20 @@ template, links this checkout, starts a local Messages-API stub, and drives one 
 `list_subagent_routes` call through the real loader. Set `DSH_BIN` to test another runtime,
 `SMOKE_KEEP=1` to keep the throwaway `$DSH_HOME`, or `SMOKE_DEBUG=1` to print session event types
 and the stub request log.
+
+To verify a published GitHub revision separately, with network access, Git, and a compatible DSH
+runtime available, run:
+
+```sh
+pnpm smoke:github 'https://github.com/filipeesch/dsh-subagent-model'
+```
+
+This check installs executable code from the supplied repository: use only a trusted URL. It uses a
+fresh disposable DSH home and profile, disables package install scripts, and runs the model request
+against the local stub. It reports the installed commit and fails if it cannot verify that revision
+or load both tools. A URL with a supported reference may be supplied instead. It tests only published
+content, not unpublished changes in the local checkout; network and host failures are not covered by
+the offline lane.
 
 See [AGENTS.md](AGENTS.md) for the verification rules that lane must follow.
 

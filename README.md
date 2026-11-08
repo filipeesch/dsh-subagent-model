@@ -1,8 +1,9 @@
 # dsh-subagent-model
 
 Model-selection delegation tools for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
-The plugin lets one agent hand a self-contained task to a subagent running on a caller-chosen
-provider, model, and reasoning effort, then receive that subagent's answer as a completion notice.
+The plugin lets one agent hand a task to a subagent running on a caller-chosen provider, model, and
+reasoning effort, optionally seeding the child with the caller's conversation, then receive that
+subagent's answer as a completion notice.
 
 It is a host-half plugin: it publishes no service, ships no UI, and imports no `@deepseek-ai`
 package, so it loads from any profile bundle without resolving host packages.
@@ -28,7 +29,8 @@ Starts one managed subagent activation on an explicitly selected route.
 | Argument | Required | Meaning |
 | --- | --- | --- |
 | `description` | yes | Short (3-5 word) task label shown in the transcript. |
-| `prompt` | yes | Complete, standalone task for the child. |
+| `prompt` | yes | The task for the child. With `inherit_context: true`, build on the inherited turns; otherwise include everything it needs. |
+| `inherit_context` | no | When `true`, seed the child with this conversation's completed turns from the immediate caller. Defaults to `false` (fresh context). |
 | `model` | yes | Model id obtained from `list_subagent_routes`. |
 | `provider` | no | Provider id; defaults to the caller's current route. Supply together with `model`. |
 | `reasoning_effort` | no | Model-specific effort id, validated against the model before the child starts. |
@@ -40,12 +42,42 @@ child or to continue it after it settles. Delegation depth is the Host's resolve
 (`ctx.subagents.resolveMaxDepth()`), forwarded with each request; the plugin applies no cap of its
 own.
 
+#### Context inheritance
+
+Set `inherit_context: true` to start the child on the host's `fork` backend. The child is seeded
+with the immediate calling agent's completed turns up to the last `turn/end`; the current
+in-flight turn is not included. Before the caller has completed a turn, the child starts without
+inherited turns. The seed is captured when the child is created, so later turns in the caller are
+not added; `send_message` continues the child's own transcript.
+
+Inheriting context sends those completed turns to the selected provider and model. The plugin does
+not restrict that to the Session's authorized routes, so choose the route deliberately. Changing
+the route can also prevent provider-side reuse of the inherited prefix; passing the caller's route
+maximizes reuse.
+
+If the composition does not provide a backend that satisfies the inheritance contract, the call
+fails before the child starts instead of silently falling back to fresh context.
+
+```json
+{
+  "description": "review the diff",
+  "prompt": "Review the staged diff and report the findings.",
+  "provider": "openai-codex",
+  "model": "gpt-6.1-sol",
+  "inherit_context": true
+}
+```
+
 ## Difference from the native delegation tool
 
-DSH 0.2.1 and later ship `subagent`/`subagent_fork` with optional route fields and a
-`list_subagent_models` catalog. Those honour the Session's authorized route list: without a
-recorded policy only the parent route may be selected. Use them when that policy is what you
-want; use this plugin when the agent must choose a model that the policy does not list.
+DSH 0.2.1 and later ship `subagent` (fresh) and `subagent_fork` (inherited context) with a
+`list_subagent_models` catalog. The native fork tool deliberately omits route fields so the child
+can reuse the parent's request prefix. This plugin exposes route fields on both context modes, so
+choosing a different model over a fork is possible with the cache trade-off documented above.
+
+The native tools honour the Session's authorized route list: without a recorded policy only the
+parent route may be selected. Use them when that policy is what you want; use this plugin when the
+agent must choose a model that the policy does not list.
 
 Both may be installed at once. The plugin never registers `list_subagent_models`, so the native
 catalog keeps its own name and scope.
@@ -89,7 +121,7 @@ Restart the host after linking so the plugin reloads. Keep the linked checkout a
 
 ```sh
 pnpm install          # vitest only; .npmrc points at the public registry
-pnpm test             # unit lane: tool contracts, route resolution, activation spec
+pnpm test             # unit lane: tool contracts, context modes, route resolution, activation spec
 pnpm smoke            # isolated loader lane against the installed DSH runtime
 ```
 

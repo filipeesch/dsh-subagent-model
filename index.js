@@ -12,6 +12,7 @@
  */
 
 import { createCatalogTool } from "./lib/catalog.js";
+import { DEFAULT_CONTEXT_MODES } from "./lib/context-modes.js";
 import { createDelegationTool } from "./lib/delegation.js";
 
 const name = "subagent-model";
@@ -25,7 +26,11 @@ const inject = ["tools", "subagents", "llm"];
  */
 function apply(ctx) {
   ctx.tools.register(createCatalogTool(ctx.llm));
-  ctx.tools.register(createDelegationTool({ llm: ctx.llm, subagents: ctx.subagents }));
+  ctx.tools.register(createDelegationTool({
+    llm: ctx.llm,
+    subagents: ctx.subagents,
+    contextModes: DEFAULT_CONTEXT_MODES
+  }));
 }
 
 export { apply, inject, name };

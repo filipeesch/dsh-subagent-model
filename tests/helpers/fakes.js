@@ -54,23 +54,50 @@ export function createLlm({ providers = [], models = {}, details = {}, resolveCa
 }
 
 /**
+ * Default subagent provider records available in the shipped composition.
+ * @returns {Record<string, object>} fresh and inheriting providers.
+ */
+function defaultProviders() {
+  return {
+    spawn: {
+      name: "spawn",
+      inheritsParentContext: false,
+      capabilities: { agentOptions: true, depthLimit: true }
+    },
+    fork: {
+      name: "fork",
+      inheritsParentContext: true,
+      capabilities: { agentOptions: true, depthLimit: true }
+    }
+  };
+}
+
+/**
  * Build a subagent runtime double that records every activation spec.
- * @param {object} [options] - child identity, depth policy, and backend availability.
+ * @param {object} [options] - child identity, depth policy, and provider overrides.
  * @param {(index: number) => string} [options.childId] - child identity factory.
  * @param {number|undefined} [options.maxDepth] - resolved Host depth limit.
- * @param {boolean} [options.providerRegistered] - whether the spawn backend is mounted.
+ * @param {Record<string, object|null>} [options.providers] - provider records merged over the defaults; a null entry removes a backend.
  * @returns {object} subagent runtime double with recorded calls.
  */
 export function createSubagents(options = {}) {
-  const { childId, providerRegistered = true } = options;
+  const { childId, providers = {} } = options;
   const maxDepth = "maxDepth" in options ? options.maxDepth : 1;
-  const calls = { startActivation: [], resolveMaxDepth: 0, getProvider: [] };
+  const calls = { startActivation: [], resolveMaxDepth: 0, getProvider: [], setProvider: [] };
   const nextChildId = childId ?? ((index) => "child-" + index);
+  const registry = new Map(
+    Object.entries({ ...defaultProviders(), ...providers })
+      .filter(([, provider]) => provider !== null && provider !== undefined)
+  );
   return {
     calls,
     getProvider(name) {
       calls.getProvider.push(name);
-      return providerRegistered ? { name } : undefined;
+      return registry.get(name);
+    },
+    setProvider(name, provider) {
+      calls.setProvider.push(name);
+      registry.set(name, provider);
     },
     resolveMaxDepth() {
       calls.resolveMaxDepth += 1;
@@ -85,14 +112,15 @@ export function createSubagents(options = {}) {
 
 /**
  * Build a calling-agent double.
- * @param {object} [options] - creation options and the latest request header.
+ * @param {object} [options] - identity, creation options, and the latest request header.
+ * @param {string} [options.id] - agent identity.
  * @param {object} [options.options] - creation-time agent options.
  * @param {object} [options.header] - latest request header config.
  * @returns {object} agent double.
  */
-export function createAgent({ options = {}, header } = {}) {
+export function createAgent({ id = "agent-parent", options = {}, header } = {}) {
   return {
-    id: "agent-parent",
+    id,
     options: { provider: "parent-provider", model: "parent-model", ...options },
     session: { requestHeader: () => (header === undefined ? undefined : { config: header }) }
   };

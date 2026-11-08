@@ -12,21 +12,26 @@
 - Tool definitions are plain JSON-Schema objects registered from `apply()`; registration is
   owner-scoped and disposing the plugin fiber unregisters both tools.
 - One module, one responsibility: `lib/route.js` resolves and validates a child route,
-  `lib/catalog.js` renders discovery, `lib/delegation.js` starts activations, and `index.js` only
-  wires them. Pass services into factories instead of reading module-level state.
+  `lib/context-modes.js` maps a context mode to its subagent backend and validates the backend
+  contract, `lib/activation.js` builds the activation request, `lib/catalog.js` renders discovery,
+  `lib/delegation.js` starts activations, and `index.js` only wires them. Pass services into
+  factories instead of reading module-level state.
 - Never register a name the host owns: `subagent`, `subagent_fork`, and `list_subagent_models`
   belong to `@deepseek-ai/dsh-tool-subagent`. The plugin's own catalog is `list_subagent_routes`.
 - Delegation uses managed activations with `delivery: 'parent'` and forwards the Host's resolved
   depth limit (`ctx.subagents.resolveMaxDepth()`, omitting the field only when the Host delegates
   depth to the provider). Never add a plugin-local cap.
+- Context inheritance selects the `fork` backend through the injected context-mode registry
+  (`fresh` -> `spawn`, `inherit` -> `fork`). Never hardcode a backend in the tool body; validate
+  `inheritsParentContext` and `agentOptions` and fail loud when the backend cannot honor the mode.
 - Fail loud with actionable messages that name the requested value and the known alternatives.
 
 ## Verification
 
 Two lanes, both required before claiming completion:
 
-1. `pnpm test` — unit lane. Vitest over fakes: tool schemas, route resolution, the exact
-   activation spec, catalog rendering, and rejection messages.
+1. `pnpm test` — unit lane. Vitest over fakes: tool schemas, context-mode contracts, route
+   resolution, the exact activation spec, catalog rendering, and rejection messages.
 2. `pnpm smoke` — isolated loader lane. Clones a throwaway `$DSH_HOME` from the `headless`
    template, links this checkout, and drives one scripted `list_subagent_routes` call through the
    real runtime against a local Messages-API stub.

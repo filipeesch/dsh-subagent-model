@@ -50,6 +50,7 @@ describe("list_subagent_routes definition", () => {
     expect(tool.description).toContain("not limited by the Session's authorized model list");
     expect(tool.parameters.properties.provider.type).toBe("string");
     expect(tool.parameters.properties.model.description).toContain("requires provider");
+    expect(tool.parameters.additionalProperties).toBe(false);
     expect(tool.output.schema).toEqual({ type: "string" });
     expect(tool.output.render({}, "hello")).toEqual([{ type: "text", text: "hello" }]);
   });
@@ -134,6 +135,11 @@ describe("list_subagent_routes rejections", () => {
       .rejects.toThrow(
         'LLM provider "missing" is not registered; available providers: deepseek-official, openai-codex'
       );
+  });
+
+  it("rejects an argument the schema does not declare", async () => {
+    await expect(run(createLlm({ providers }), { provider: "deepseek-official", unexpected_argument: true }))
+      .rejects.toThrow("undeclared argument: unexpected_argument");
   });
 
   it("reports an unavailable LLM runtime", async () => {

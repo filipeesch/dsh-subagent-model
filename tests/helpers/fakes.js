@@ -76,15 +76,17 @@ function defaultProviders() {
  * Build a subagent runtime double that records every activation spec.
  * @param {object} [options] - child identity, depth policy, and provider overrides.
  * @param {(index: number) => string} [options.childId] - child identity factory.
+ * @param {(index: number) => string} [options.childName] - host-assigned child name factory.
  * @param {number|undefined} [options.maxDepth] - resolved Host depth limit.
  * @param {Record<string, object|null>} [options.providers] - provider records merged over the defaults; a null entry removes a backend.
  * @returns {object} subagent runtime double with recorded calls.
  */
 export function createSubagents(options = {}) {
-  const { childId, providers = {} } = options;
+  const { childId, childName, providers = {} } = options;
   const maxDepth = "maxDepth" in options ? options.maxDepth : 1;
   const calls = { startActivation: [], resolveMaxDepth: 0, getProvider: [], setProvider: [] };
   const nextChildId = childId ?? ((index) => "child-" + index);
+  const nextChildName = childName ?? ((index) => "agent-" + index);
   const registry = new Map(
     Object.entries({ ...defaultProviders(), ...providers })
       .filter(([, provider]) => provider !== null && provider !== undefined)
@@ -105,7 +107,8 @@ export function createSubagents(options = {}) {
     },
     async startActivation(spec) {
       calls.startActivation.push(spec);
-      return { childId: nextChildId(calls.startActivation.length) };
+      const index = calls.startActivation.length;
+      return { childId: nextChildId(index), name: nextChildName(index) };
     }
   };
 }

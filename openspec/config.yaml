@@ -6,8 +6,10 @@ context: |
   Keep OpenSpec structural headings and SHALL/MUST keywords in English.
 
   Project: dsh-subagent-model — a DeepSeek Harness (DSH) host-half plugin that
-  adds model-selection subagent delegation tools (`list_subagent_models`,
-  `subagent_model`).
+  adds model-selection subagent delegation tools (`list_subagent_routes`,
+  `subagent_model`). The native `subagent`/`subagent_fork` tools and their
+  `list_subagent_models` catalog belong to `@deepseek-ai/dsh-tool-subagent`; this
+  plugin never claims those names.
   Tech stack: Node ESM JavaScript with no runtime dependencies; a single
   `index.js` entry plus `cordis.patch.yml` (the DSH bundle patch that inserts the
   plugin), declared in `package.json` under `dsh.bundle`.
@@ -15,8 +17,8 @@ context: |
   `@deepseek-ai/dsh-tool-subagent` package, and profile bundles installed with
   `dsh plugin add link:<path>`.
   Upstream reference: the DSH checkout at
-  /Users/filipe.esch/projects/pessoal/deepseek-harness (installed app version is
-  the same release line). Prefer replicating upstream package patterns
+  /Users/filipe.esch/projects/pessoal/private-dsh (the development runtime; the
+  installed desktop app may be an older release line). Prefer replicating upstream package patterns
   (typed seams, small modules, injected dependencies) over bespoke approaches.
 
 # Per-artifact rules (optional)

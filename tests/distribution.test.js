@@ -10,7 +10,9 @@ const requiredFiles = [
   "package.json",
   "cordis.patch.yml",
   "index.js",
+  "lib/activation.js",
   "lib/catalog.js",
+  "lib/context-modes.js",
   "lib/delegation.js",
   "lib/fields.js",
   "lib/route.js",
@@ -20,8 +22,9 @@ const requiredFiles = [
 describe("DSH distribution", () => {
   it("declares the bundle patch and supported host range", () => {
     expect(manifest.name).toBe("dsh-subagent-model");
+    expect(manifest.version).toBe("0.4.0");
     expect(manifest.dsh?.bundle?.patch).toBe("./cordis.patch.yml");
-    expect(manifest.engines?.dsh).toBe(">=0.2.1-alpha.2 <0.3.0");
+    expect(manifest.engines?.dsh).toBe(">=0.2.2-rc.1 <0.3.0");
   });
 
   it("inserts the package under the plugin's runtime identity", async () => {

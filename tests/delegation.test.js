@@ -34,13 +34,17 @@ describe("subagent_model definition", () => {
     expect(tool.name).toBe("subagent_model");
     expect(tool.parameters.required).toEqual(["description", "prompt", "model"]);
     expect(Object.keys(tool.parameters.properties).sort())
-      .toEqual(["cwd", "description", "inherit_context", "model", "prompt", "provider", "reasoning_effort"]);
+      .toEqual(["cwd", "description", "inherit_context", "model", "name", "prompt", "provider", "reasoning_effort"]);
     expect(tool.parameters.properties.inherit_context.type).toBe("boolean");
     expect(tool.parameters.required).not.toContain("inherit_context");
+    expect(tool.parameters.required).not.toContain("name");
     expect(tool.parameters.properties.run_in_background).toBeUndefined();
+    expect(tool.parameters.additionalProperties).toBe(false);
     expect(tool.output.schema.properties.kind.const).toBe("activation");
-    expect(tool.output.render({}, { kind: "activation", subagentId: "child-1" }))
-      .toEqual([{ type: "text", text: "started subagent child-1" }]);
+    expect(tool.output.schema.required).toEqual(["kind", "subagentId", "name"]);
+    expect(tool.output.schema.additionalProperties).toBe(false);
+    expect(tool.output.render({}, { kind: "activation", subagentId: "child-1", name: "verifier" }))
+      .toEqual([{ type: "text", text: "started subagent verifier (child-1)" }]);
     expect(tool.isConcurrencySafe()).toBe(true);
   });
 
@@ -84,21 +88,20 @@ describe("subagent_model delegation", () => {
       ...args
     }, createExec({ agent, signal }));
 
-    expect(result).toEqual({ kind: "activation", subagentId: "child-1" });
+    expect(result).toEqual({ kind: "activation", subagentId: "child-1", name: "agent-1" });
     expect(subagents.calls.startActivation).toHaveLength(1);
     expect(subagents.calls.startActivation).toEqual([{
       provider: backend,
+      prompt: [{ type: "text", text: "Review the staged diff." }],
+      parent: agent,
+      agentOptions: { provider: "openai-codex", model: "gpt-6.1-sol", reasoningEffort: "high" },
+      maxDepth: 1,
+      cwd: "/tmp/work",
       label: "review the diff",
-      request: {
-        prompt: [{ type: "text", text: "Review the staged diff." }],
-        parent: agent,
-        agentOptions: { provider: "openai-codex", model: "gpt-6.1-sol", reasoningEffort: "high" },
-        maxDepth: 1,
-        cwd: "/tmp/work"
-      },
       signal,
       delivery: "parent"
     }]);
+    expect(subagents.calls.startActivation[0]).not.toHaveProperty("request");
     expect(subagents.calls.getProvider).toEqual([backend, backend]);
     expect(subagents.calls.resolveMaxDepth).toBe(1);
   });
@@ -109,8 +112,8 @@ describe("subagent_model delegation", () => {
 
     await tool.execute({ description: "d", prompt: "p", model: "m", ...args }, createExec({ agent: immediate }));
 
-    expect(subagents.calls.startActivation[0].request.parent).toBe(immediate);
-    expect(subagents.calls.startActivation[0].request.parent.id).toBe("agent-nested");
+    expect(subagents.calls.startActivation[0].parent).toBe(immediate);
+    expect(subagents.calls.startActivation[0].parent.id).toBe("agent-nested");
   });
 
   it.each(modes)("forwards the Host depth limit (inherit_context=$name)", async ({ args }) => {
@@ -119,7 +122,7 @@ describe("subagent_model delegation", () => {
 
     await tool.execute({ description: "d", prompt: "p", model: "m", ...args }, createExec({ agent }));
 
-    expect(subagents.calls.startActivation[0].request.maxDepth).toBe(4);
+    expect(subagents.calls.startActivation[0].maxDepth).toBe(4);
     expect(subagents.calls.resolveMaxDepth).toBe(1);
   });
 
@@ -129,7 +132,7 @@ describe("subagent_model delegation", () => {
 
     await tool.execute({ description: "d", prompt: "p", model: "m", ...args }, createExec({ agent }));
 
-    expect(subagents.calls.startActivation[0].request).not.toHaveProperty("maxDepth");
+    expect(subagents.calls.startActivation[0]).not.toHaveProperty("maxDepth");
   });
 
   it.each([
@@ -171,7 +174,7 @@ describe("subagent_model delegation", () => {
 
     await tool.execute({ description: "d", prompt: "p", model: "requested" }, createExec({ agent }));
 
-    expect(subagents.calls.startActivation[0].request.agentOptions)
+    expect(subagents.calls.startActivation[0].agentOptions)
       .toEqual({ provider: "live", model: "requested" });
   });
 
@@ -181,8 +184,41 @@ describe("subagent_model delegation", () => {
     await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
 
     const spec = subagents.calls.startActivation[0];
-    expect(spec.request).not.toHaveProperty("cwd");
-    expect(spec.request.agentOptions).toEqual({ provider: "parent-provider", model: "m" });
+    expect(spec).not.toHaveProperty("cwd");
+    expect(spec).not.toHaveProperty("name");
+    expect(spec.agentOptions).toEqual({ provider: "parent-provider", model: "m" });
+  });
+
+  it("forwards the requested child name and reports the host-resolved one", async () => {
+    const { tool, subagents, agent } = setup();
+
+    const result = await tool.execute(
+      { description: "d", prompt: "p", model: "m", name: "verifier" },
+      createExec({ agent })
+    );
+
+    expect(subagents.calls.startActivation[0].name).toBe("verifier");
+    expect(result).toEqual({ kind: "activation", subagentId: "child-1", name: "agent-1" });
+  });
+
+  it("reports the host-assigned name when no name is requested", async () => {
+    const subagents = createSubagents({ childName: () => "verifier" });
+    const { tool, agent } = setup({ subagents });
+
+    const result = await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
+    expect(result.name).toBe("verifier");
+    expect(result.subagentId).toBe("child-1");
+  });
+
+  it("rejects an argument the schema does not declare", async () => {
+    const { tool, subagents, agent } = setup();
+
+    await expect(tool.execute(
+      { description: "d", prompt: "p", model: "m", unexpected_argument: true },
+      createExec({ agent })
+    )).rejects.toThrow("undeclared argument: unexpected_argument");
+    expect(subagents.calls.startActivation).toHaveLength(0);
   });
 
   it("requires a calling agent", async () => {
@@ -193,8 +229,8 @@ describe("subagent_model delegation", () => {
     expect(subagents.calls.startActivation).toHaveLength(0);
   });
 
-  it("rejects an empty description, prompt, or working directory", async () => {
-    const { tool, agent } = setup();
+  it("rejects an empty description, prompt, name, or working directory", async () => {
+    const { tool, subagents, agent } = setup();
 
     await expect(tool.execute({ description: "", prompt: "p", model: "m" }, createExec({ agent })))
       .rejects.toThrow("`description` must be a non-empty string");
@@ -202,6 +238,9 @@ describe("subagent_model delegation", () => {
       .rejects.toThrow("`prompt` must be a non-empty string");
     await expect(tool.execute({ description: "d", prompt: "p", model: "m", cwd: "" }, createExec({ agent })))
       .rejects.toThrow("`cwd` must be a non-empty string");
+    await expect(tool.execute({ description: "d", prompt: "p", model: "m", name: "" }, createExec({ agent })))
+      .rejects.toThrow("`name` must be a non-empty string");
+    expect(subagents.calls.startActivation).toHaveLength(0);
   });
 
   it("rejects a non-boolean inherit_context before resolving a backend", async () => {

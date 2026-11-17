@@ -9,11 +9,15 @@ context: |
   adds model-selection subagent delegation tools (`list_subagent_routes`,
   `subagent_model`). The native `subagent`/`subagent_fork` tools and their
   `list_subagent_models` catalog belong to `@deepseek-ai/dsh-tool-subagent`; this
-  plugin never claims those names.
+  plugin never claims those names, and while loaded it suppresses them (plus
+  `workflow`) for every agent through scoped tool restrictions with an
+  execution-guard backstop, contributing the delegation guidance they used to
+  carry.
   Tech stack: Node ESM JavaScript with no runtime dependencies; a single
   `index.js` entry plus `cordis.patch.yml` (the DSH bundle patch that inserts the
   plugin), declared in `package.json` under `dsh.bundle`.
-  Domain: DSH host services (`ctx.tools`, `ctx.subagents`, `ctx.llm`), the
+  Domain: DSH host services (`ctx.tools`, `ctx.subagents`, `ctx.llm`, `ctx.agents`,
+  `ctx.systemPrompt`), the
   `@deepseek-ai/dsh-tool-subagent` package, and profile bundles installed with
   `dsh plugin add link:<path>`.
   Upstream reference: the DSH checkout at

@@ -27,6 +27,18 @@ describe("parentRoute", () => {
     expect(parentRoute(parent)).toEqual({ provider: "created-provider", model: "created-model" });
   });
 
+  it("keeps the creation-time effort before the first request", () => {
+    const parent = createAgent({
+      options: { provider: "created-provider", model: "created-model", reasoningEffort: "high" }
+    });
+
+    expect(parentRoute(parent)).toEqual({
+      provider: "created-provider",
+      model: "created-model",
+      reasoningEffort: "high"
+    });
+  });
+
   it("reports no route when neither source has one", () => {
     expect(parentRoute({ options: {}, session: { requestHeader: () => undefined } }))
       .toEqual({ provider: undefined, model: undefined });
@@ -61,7 +73,47 @@ describe("resolveRoute", () => {
     const parent = { options: {}, session: { requestHeader: () => undefined } };
 
     await expect(resolveRoute(createLlm(), parent, { model: "m" }, liveSignal()))
-      .rejects.toThrow("no LLM provider route: pass `provider` or run under an agent that has one");
+      .rejects.toThrow("no LLM provider route: pass `provider` and `model` or run under an agent that has one");
+  });
+
+  it("uses the calling agent's route when the model is omitted", async () => {
+    const llm = createLlm();
+    const parent = createAgent({ header: { provider: "live-provider", model: "live-model" } });
+
+    await expect(resolveRoute(llm, parent, {}, liveSignal()))
+      .resolves.toEqual({ provider: "live-provider", model: "live-model" });
+    expect(llm.calls.resolveCallConfig).toEqual([{
+      config: { provider: "live-provider", model: "live-model" },
+      signal: expect.any(AbortSignal)
+    }]);
+  });
+
+  it("keeps the calling agent's effort when the model is omitted", async () => {
+    const parent = createAgent({ header: { provider: "live-provider", model: "live-model", reasoningEffort: "high" } });
+
+    await expect(resolveRoute(createLlm(), parent, {}, liveSignal()))
+      .resolves.toEqual({ provider: "live-provider", model: "live-model", reasoningEffort: "high" });
+  });
+
+  it("uses the creation-time effort when no request header exists yet", async () => {
+    const parent = createAgent({
+      options: { provider: "created-provider", model: "created-model", reasoningEffort: "high" }
+    });
+
+    await expect(resolveRoute(createLlm(), parent, {}, liveSignal()))
+      .resolves.toEqual({ provider: "created-provider", model: "created-model", reasoningEffort: "high" });
+  });
+
+  it("rejects a call with no model anywhere", async () => {
+    const parent = { options: { provider: "p" }, session: { requestHeader: () => undefined } };
+
+    await expect(resolveRoute(createLlm(), parent, {}, liveSignal()))
+      .rejects.toThrow("no LLM model route: pass `model` or run under an agent that has one");
+  });
+
+  it("rejects a reasoning effort without a model", async () => {
+    await expect(resolveRoute(createLlm(), createAgent(), { reasoning_effort: "high" }, liveSignal()))
+      .rejects.toThrow("`reasoning_effort` requires `model`; supply both or omit `reasoning_effort`");
   });
 
   it("validates the route and effort through the LLM runtime", async () => {

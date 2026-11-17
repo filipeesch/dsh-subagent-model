@@ -12,9 +12,13 @@ const requiredFiles = [
   "index.js",
   "lib/activation.js",
   "lib/catalog.js",
+  "lib/config.js",
   "lib/context-modes.js",
   "lib/delegation.js",
+  "lib/descriptions.js",
   "lib/fields.js",
+  "lib/guidance.js",
+  "lib/native-mask.js",
   "lib/route.js",
   "README.md"
 ];
@@ -22,7 +26,7 @@ const requiredFiles = [
 describe("DSH distribution", () => {
   it("declares the bundle patch and supported host range", () => {
     expect(manifest.name).toBe("dsh-subagent-model");
-    expect(manifest.version).toBe("0.4.0");
+    expect(manifest.version).toBe("0.5.0");
     expect(manifest.dsh?.bundle?.patch).toBe("./cordis.patch.yml");
     expect(manifest.engines?.dsh).toBe(">=0.2.2-rc.1 <0.3.0");
   });
@@ -41,7 +45,7 @@ describe("DSH distribution", () => {
     expect(manifest.exports?.["."]).toBe("./index.js");
     expect(manifest.exports?.["./package.json"]).toBe("./package.json");
     const entry = await import(new URL(`../${manifest.main}`, import.meta.url));
-    expect(entry.inject).toEqual(["tools", "subagents", "llm"]);
+    expect(entry.inject).toEqual(["tools", "subagents", "llm", "agents", "systemPrompt"]);
     expect(entry.apply).toBeTypeOf("function");
     expect(manifest.dependencies ?? {}).toEqual({});
   });

@@ -98,6 +98,19 @@ describe("resolveContextBackend", () => {
       .toThrow('subagent backend "fork" cannot accept the child `agentOptions` required by `subagent_model` (inherit_context=true)');
   });
 
+  it("names the requested backend, the mode, and the configuration key when a configured name has no provider", () => {
+    const subagents = createSubagents();
+    const modes = {
+      fresh: { provider: "custom-fresh", inheritsParentContext: false },
+      inherit: { provider: "fork", inheritsParentContext: true }
+    };
+
+    expect(() => resolveContextBackend({ subagents, inheritContext: false, modes })).toThrow(
+      'inherit_context=false requires the subagent backend "custom-fresh", which is not registered '
+      + "in this composition; register that provider or point `backends.fresh` at a registered one"
+    );
+  });
+
   it("rejects a registry without the selected mode", () => {
     const subagents = createSubagents();
 

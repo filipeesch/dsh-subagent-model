@@ -14,11 +14,12 @@
  * the expected host for the delegation lane.
  *
  * Stub script (per run):
- *   1. first main-agent request            -> `list_subagent_routes` call
- *   2. main-agent request after a result   -> `subagent_model` call (delegation lane only)
- *   3. child-agent request                 -> final text for the child
- *   4. main-agent request after a result   -> `subagent_model` with an undeclared argument
- *   5. main-agent request after a result   -> final text for the parent
+ *   1. first main-agent request                    -> `list_subagent_routes` call
+ *   2. after a result (mask lane)                  -> one call per masked probe tool
+ *   3. after a result (delegation lane)            -> `subagent_model` call
+ *   4. child-agent request                         -> final text for the child
+ *   5. after a result (delegation lane)            -> `subagent_model` with an undeclared argument
+ *   6. after a result                              -> final text for the parent
  *
  * Environment:
  *   DSH_BIN       runtime executable to boot (highest priority)
@@ -28,7 +29,7 @@
  *   SMOKE_DEBUG   print session event types and the stub request log
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -44,6 +45,41 @@ const DELEGATION_TOOL_NAME = "subagent_model";
 const CHILD_MODEL = "deepseek-flash";
 /** Child name the scripted delegation requests, unique among the calling agent's children. */
 const CHILD_NAME = "smoke-child";
+/** Host delegation tools the plugin must hide from the model-facing catalog. */
+const MASKED_TOOL_NAMES = ["subagent", "subagent_fork", "list_subagent_models", "workflow"];
+/** Masked tools the scripted lane calls anyway; the guard must refuse each with its replacement. */
+const MASKED_PROBES = ["subagent", "list_subagent_models"];
+
+/**
+ * Write the overlay that turns the native route fields on, reproducing the composition that
+ * motivated this lane: `modelSelection` exposes provider/model on `subagent`, and
+ * `modelDiscovery` registers the policy-filtered catalog.
+ * @param {string} home - throwaway `$DSH_HOME`.
+ * @returns {string} overlay path accepted by `--patch`.
+ */
+function writeMaskOverlay(home) {
+  const path = join(home, "mask-overlay.patch.yml");
+  writeFileSync(path, [
+    "# Smoke overlay: expose the native route fields so the plugin's mask is exercised.",
+    "- id: tool-subagent",
+    "  config:",
+    "    provider: spawn",
+    "    toolName: subagent",
+    "    modelSelection: true",
+    "    modelDiscovery: true",
+    ""
+  ].join("\n"));
+  return path;
+}
+
+/**
+ * Flatten one tool result's model-facing text.
+ * @param {object} message - recorded tool message.
+ * @returns {string} concatenated text blocks.
+ */
+function contentText(message) {
+  return (message.content ?? []).map((block) => (block.type === "text" ? block.text : "")).join(" ");
+}
 
 /** Throwaway `$DSH_HOME` of the current run, reported when the run fails and is kept. */
 let currentHome;
@@ -184,12 +220,13 @@ function parseBody(body) {
 
 /**
  * Start the local Messages-API stub.
- * @param {{ delegation: boolean, workspace: string }} options - whether to script a delegation, and the child directory to request.
- * @returns {Promise<{ port: number, requests: string[], close: () => Promise<void> }>}
+ * @param {{ delegation: boolean, mask: boolean, workspace: string }} options - whether to script a delegation, whether to probe a masked tool, and the child directory to request.
+ * @returns {Promise<{ port: number, requests: string[], systemBody: () => string, close: () => Promise<void> }>}
  */
-async function startStub({ delegation, workspace }) {
+async function startStub({ delegation, mask, workspace }) {
   const requests = [];
   let catalogRequested = false;
+  let catalogBody;
   let parentSteps = 0;
   const server = createServer((request, response) => {
     const chunks = [];
@@ -220,11 +257,24 @@ async function startStub({ delegation, workspace }) {
       }
       if (body.includes('"tool_result"')) {
         parentSteps += 1;
-        if (!delegation) {
+        const plan = [];
+        if (mask) plan.push(...MASKED_PROBES.map((name) => "probe:" + name));
+        if (delegation) plan.push("delegate", "undeclared");
+        const action = plan[parentSteps - 1];
+        if (action === undefined) {
           respondWithText(response, "SMOKE_TURN_COMPLETE");
           return;
         }
-        if (parentSteps === 1) {
+        if (action.startsWith("probe:")) {
+          // Each masked native tool must be refused even when the model asks for it anyway.
+          respondWithToolCall(response, "toolu_probe_" + action.slice("probe:".length), action.slice("probe:".length), {
+            description: "probe masked tool",
+            prompt: "unused",
+            model: CHILD_MODEL
+          });
+          return;
+        }
+        if (action === "delegate") {
           respondWithToolCall(response, "toolu_delegate", DELEGATION_TOOL_NAME, {
             description: "probe child route",
             prompt: "Reply with the smoke result and use no tools.",
@@ -234,20 +284,17 @@ async function startStub({ delegation, workspace }) {
           });
           return;
         }
-        if (parentSteps === 2) {
-          respondWithToolCall(response, "toolu_undeclared", DELEGATION_TOOL_NAME, {
-            description: "reject undeclared argument",
-            prompt: "unused",
-            model: CHILD_MODEL,
-            unexpected_argument: true
-          });
-          return;
-        }
-        respondWithText(response, "SMOKE_TURN_COMPLETE");
+        respondWithToolCall(response, "toolu_undeclared", DELEGATION_TOOL_NAME, {
+          description: "reject undeclared argument",
+          prompt: "unused",
+          model: CHILD_MODEL,
+          unexpected_argument: true
+        });
         return;
       }
       if (!catalogRequested) {
         catalogRequested = true;
+        catalogBody = body;
         respondWithToolCall(response, "toolu_catalog", TOOL_NAME, {});
         return;
       }
@@ -260,6 +307,8 @@ async function startStub({ delegation, workspace }) {
   return {
     port: address.port,
     requests,
+    /** The request body that first advertised the plugin catalog; it carries the system prompt. */
+    systemBody: () => catalogBody ?? "",
     close: () => new Promise((resolve) => server.close(() => resolve()))
   };
 }
@@ -372,6 +421,7 @@ function fail(detail, context = []) {
  * @param {boolean} [options.keep] - keep the throwaway home.
  * @param {boolean} [options.isolatedEnvironment] - boot with a minimal environment.
  * @param {boolean} [options.delegation] - script a real `subagent_model` call; requires a host with the flattened spec.
+ * @param {boolean} [options.mask] - compose the native route fields and assert the plugin hides them.
  * @returns {Promise<void>}
  */
 export async function runSmoke({
@@ -379,8 +429,12 @@ export async function runSmoke({
   onInstalled = () => {},
   keep = Boolean(process.env.SMOKE_KEEP),
   isolatedEnvironment = false,
-  delegation = false
+  delegation = false,
+  mask = delegation
 } = {}) {
+  if (mask && !delegation) {
+    throw new Error("smoke: the mask lane probes a real delegation, so it requires delegation: true");
+  }
   const host = resolveHost();
   const home = mkdtempSync(join(tmpdir(), "dsh-subagent-model-smoke-"));
   currentHome = home;
@@ -413,14 +467,17 @@ export async function runSmoke({
     }
     await onInstalled({ home, profile: PROFILE });
 
-    stub = await startStub({ delegation, workspace });
+    // Compose the composition that broke: the native tool advertises route fields.
+    const overlay = mask ? writeMaskOverlay(home) : undefined;
+    stub = await startStub({ delegation, mask, workspace });
     const runEnv = {
       ...env,
       DEEPSEEK_BASE_URL: "http://127.0.0.1:" + stub.port,
       DEEPSEEK_API_KEY: "smoke-key"
     };
     const run = await new Promise((resolve) => {
-      const child = spawn(host.command, [...host.prefix, "--profile", PROFILE, "Reply with the smoke result."], {
+      const overlayArgs = overlay === undefined ? [] : ["--patch", overlay];
+      const child = spawn(host.command, [...host.prefix, "--profile", PROFILE, ...overlayArgs, "Reply with the smoke result."], {
         env: runEnv,
         cwd: host.cwd ?? home
       });
@@ -460,13 +517,70 @@ export async function runSmoke({
       console.log("stub requests:\n" + stub.requests.join("\n"));
     }
 
-    const sessionText = events.map((event) => JSON.stringify(event)).join("\n");
-    const requestHeader = events.find((event) => event.type === "request/header");
+    const parentSession = sessions.find((session) => session[0]?.type === "session" && session[0].origin !== "subagent");
+    if (parentSession === undefined) fail("no parent session was recorded");
+    const recordedChildSession = sessions.find((session) => session[0]?.type === "session" && session[0].origin === "subagent");
+    const requestHeader = parentSession.find((event) => event.type === "request/header");
     if (requestHeader === undefined) fail("no request header was recorded: the tool catalog was never sent");
     const toolNames = (requestHeader.data.header.tools ?? []).map((tool) => tool.name);
-    for (const required of [TOOL_NAME, DELEGATION_TOOL_NAME]) {
-      const occurrences = toolNames.filter((name) => name === required).length;
-      if (occurrences !== 1) fail("expected exactly one " + required + " in the request tool catalog, saw " + occurrences);
+
+    /**
+     * Assert one agent's model-facing catalog.
+     * @param {string[]} names - tool names in that catalog.
+     * @param {string} label - which catalog is under test.
+     * @returns {void}
+     */
+    const assertCatalog = (names, label) => {
+      for (const required of [TOOL_NAME, DELEGATION_TOOL_NAME]) {
+        const occurrences = names.filter((name) => name === required).length;
+        if (occurrences !== 1) {
+          fail("expected exactly one " + required + " in the " + label + " tool catalog, saw " + occurrences);
+        }
+      }
+      if (!mask) return;
+      for (const maskedName of MASKED_TOOL_NAMES) {
+        if (names.includes(maskedName)) fail("the masked tool is still in the " + label + " tool catalog: " + maskedName);
+      }
+    };
+    assertCatalog(toolNames, "request");
+
+    if (mask) {
+      // The child is an agent too: its catalog must carry the same sanitized surface.
+      if (recordedChildSession === undefined) fail("no subagent session was recorded for the mask lane");
+      const childHeader = recordedChildSession.find((event) => event.type === "request/header");
+      if (childHeader === undefined) fail("the child session recorded no request header");
+      assertCatalog((childHeader.data.header.tools ?? []).map((tool) => tool.name), "child");
+
+      // A call that still reaches dispatch is refused by the execution guard with the replacement hint.
+      for (const probed of MASKED_PROBES) {
+        const replacement = probed === "list_subagent_models" ? TOOL_NAME : DELEGATION_TOOL_NAME;
+        const refusal = events.find((event) => event.type === "tool/result"
+          && contentText(event.data.message).includes("`" + probed + "` is unavailable while the dsh-subagent-model plugin is loaded"));
+        if (refusal === undefined) {
+          fail("the masked " + probed + " call was not refused by the plugin", [
+            events.filter((event) => event.type === "tool/result")
+              .map((event) => contentText(event.data.message).slice(0, 200))
+              .join("\n")
+          ]);
+        }
+        if (refusal.data.message.isError !== true) fail("the masked " + probed + " call did not fail");
+        if (!contentText(refusal.data.message).includes("`" + replacement + "`")) {
+          fail("the masked " + probed + " refusal does not name " + replacement);
+        }
+      }
+
+      // The prompt carries the plugin's guidance, rendered against the composition it detected. The
+      // exact unavailable list is the positive control that the overlay really registered the native
+      // route fields: `list_subagent_models` exists only while `modelDiscovery` is on.
+      const systemBody = stub.systemBody();
+      if (!systemBody.includes("Delegate with `" + DELEGATION_TOOL_NAME + "`")) {
+        fail("the delegation guidance is missing from the system prompt");
+      }
+      const unavailable = "Unavailable while this plugin is loaded: "
+        + MASKED_TOOL_NAMES.map((name) => "`" + name + "`").join(", ") + ".";
+      if (!systemBody.includes(unavailable)) {
+        fail("the delegation guidance does not report the expected masked surface", [unavailable]);
+      }
     }
 
     const catalogCall = events.find((event) => event.type === "tool/call" && event.data.name === TOOL_NAME);
@@ -538,7 +652,8 @@ export async function runSmoke({
     }
 
     console.log("smoke ok: " + sessionFiles.length + " session(s), both tools registered"
-      + (delegation ? ", delegation started with the flattened activation spec" : " and the catalog executed"));
+      + (delegation ? ", delegation started with the flattened activation spec" : " and the catalog executed")
+      + (mask ? ", native delegation surface masked" : ""));
     if (keep) console.log("kept session home: " + home);
   } finally {
     await stub?.close();

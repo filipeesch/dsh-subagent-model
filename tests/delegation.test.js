@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolveConfig } from "../lib/config.js";
 import { createDelegationTool } from "../lib/delegation.js";
 import { createAgent, createExec, createLlm, createSubagents } from "./helpers/fakes.js";
 
@@ -28,11 +29,11 @@ function setup({ agent = createAgent(), llm = createLlm(), subagents = createSub
 }
 
 describe("subagent_model definition", () => {
-  it("requires the task and the model, without a background switch", () => {
+  it("requires the task, leaves the model optional, and has no background switch", () => {
     const { tool } = setup();
 
     expect(tool.name).toBe("subagent_model");
-    expect(tool.parameters.required).toEqual(["description", "prompt", "model"]);
+    expect(tool.parameters.required).toEqual(["description", "prompt"]);
     expect(Object.keys(tool.parameters.properties).sort())
       .toEqual(["cwd", "description", "inherit_context", "model", "name", "prompt", "provider", "reasoning_effort"]);
     expect(tool.parameters.properties.inherit_context.type).toBe("boolean");
@@ -166,6 +167,30 @@ describe("subagent_model delegation", () => {
 
     await expect(tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent: createAgent() })))
       .rejects.toThrow("subagent_model requires managed activations");
+  });
+
+  it.each([
+    { name: "omitted", args: {} },
+    { name: "false", args: { inherit_context: false } },
+    { name: "true", args: { inherit_context: true } }
+  ])("delegates on the calling agent's route when the model is omitted (inherit_context=$name)", async ({ args }) => {
+    const agent = createAgent({ header: { provider: "live", model: "live" } });
+    const { tool, subagents } = setup({ agent });
+
+    await tool.execute({ description: "d", prompt: "p", ...args }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation).toHaveLength(1);
+    expect(subagents.calls.startActivation[0].agentOptions).toEqual({ provider: "live", model: "live" });
+  });
+
+  it.each(modes)("rejects a reasoning effort without a model (inherit_context=$name)", async ({ args }) => {
+    const { tool, subagents, agent } = setup();
+
+    await expect(tool.execute(
+      { description: "d", prompt: "p", reasoning_effort: "high", ...args },
+      createExec({ agent })
+    )).rejects.toThrow("`reasoning_effort` requires `model`; supply both or omit `reasoning_effort`");
+    expect(subagents.calls.startActivation).toHaveLength(0);
   });
 
   it("defaults the provider to the calling agent's live route", async () => {
@@ -332,6 +357,34 @@ describe("subagent_model delegation", () => {
     await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
 
     expect(subagents.calls.startActivation[0].provider).toBe("custom-spawn");
+  });
+
+  it("honors the configured backends resolved from the plugin configuration", async () => {
+    const subagents = createSubagents({
+      providers: {
+        "custom-spawn": {
+          name: "custom-spawn",
+          inheritsParentContext: false,
+          capabilities: { agentOptions: true }
+        }
+      }
+    });
+    const { contextModes } = resolveConfig({ backends: { fresh: "custom-spawn" } });
+    const { tool, agent } = setup({ subagents, contextModes });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].provider).toBe("custom-spawn");
+  });
+
+  it("forwards the calling agent's effort when the model is omitted", async () => {
+    const agent = createAgent({ header: { provider: "live", model: "live", reasoningEffort: "high" } });
+    const { tool, subagents } = setup({ agent });
+
+    await tool.execute({ description: "d", prompt: "p" }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toEqual({ provider: "live", model: "live", reasoningEffort: "high" });
   });
 
   it.each(modes)("rejects a model the provider cannot resolve before starting a child (inherit_context=$name)", async ({ args }) => {

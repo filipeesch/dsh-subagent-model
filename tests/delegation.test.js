@@ -15,11 +15,12 @@ const modes = [
  * @param {object} [options] - agent, LLM, subagent, and registry overrides.
  * @returns {{ tool: object, llm: object, subagents: object, agent: object }}
  */
-function setup({ agent = createAgent(), llm = createLlm(), subagents = createSubagents(), contextModes } = {}) {
+function setup({ agent = createAgent(), llm = createLlm(), subagents = createSubagents(), modelPin, contextModes } = {}) {
   return {
     tool: createDelegationTool({
       llm,
       subagents,
+      ...(modelPin === undefined ? {} : { modelPin }),
       ...(contextModes === undefined ? {} : { contextModes })
     }),
     llm,
@@ -89,7 +90,12 @@ describe("subagent_model delegation", () => {
       ...args
     }, createExec({ agent, signal }));
 
-    expect(result).toEqual({ kind: "activation", subagentId: "child-1", name: "agent-1" });
+    expect(result).toEqual({
+      kind: "activation",
+      subagentId: "child-1",
+      name: "agent-1",
+      reasoningEffort: "high"
+    });
     expect(subagents.calls.startActivation).toHaveLength(1);
     expect(subagents.calls.startActivation).toEqual([{
       provider: backend,
@@ -387,22 +393,328 @@ describe("subagent_model delegation", () => {
       .toEqual({ provider: "live", model: "live", reasoningEffort: "high" });
   });
 
-  it.each(modes)("rejects a model the provider cannot resolve before starting a child (inherit_context=$name)", async ({ args }) => {
+  it("omits the effective effort from the result when the route has none", async () => {
+    const { tool, agent } = setup();
+
+    const result = await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
+    expect(result).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("starts the child with the model default when the effort is not offered", async () => {
     const llm = createLlm({
-      resolveCallConfig: async () => { throw new Error("unknown model"); }
+      resolveCallConfig: async (config) => {
+        if (config.reasoningEffort !== undefined) {
+          const error = new Error("effort not supported");
+          error.code = "UNSUPPORTED_REASONING_EFFORT";
+          throw error;
+        }
+        return { ...config, reasoningEffort: "high" };
+      }
     });
     const { tool, subagents, agent } = setup({ llm });
 
-    await expect(tool.execute({
+    const result = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "p",
+      model: "m",
+      reasoning_effort: "max"
+    }, createExec({ agent }));
+
+    expect(result).toEqual({
+      kind: "activation",
+      subagentId: "child-1",
+      name: "agent-1",
+      reasoningEffort: "high"
+    });
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toEqual({ provider: "p", model: "m", reasoningEffort: "high" });
+  });
+
+  it("does not carry the parent effort into a same-route child that resolved none", async () => {
+    const llm = createLlm({ resolveCallConfig: async (config) => config });
+    const agent = createAgent({
+      header: { provider: "parent-provider", model: "same-model", reasoningEffort: "high" }
+    });
+    const { tool, subagents } = setup({ llm, agent });
+
+    const result = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "parent-provider",
+      model: "same-model"
+    }, createExec({ agent }));
+
+    // The host would keep the parent effort when the route did not change, but this plugin never
+    // validated `high` for the supplied model, so the activation states the cleared effort and the
+    // result omits it rather than advertising something the child does not run with.
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toStrictEqual({ provider: "parent-provider", model: "same-model", reasoningEffort: undefined });
+    expect(Object.hasOwn(subagents.calls.startActivation[0].agentOptions, "reasoningEffort")).toBe(true);
+    expect(result).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("clears an explicitly rejected same-route effort whose retry resolves no default", async () => {
+    const llm = createLlm({
+      resolveCallConfig: async (config) => {
+        if (config.reasoningEffort !== undefined) {
+          const error = new Error("effort not supported");
+          error.code = "UNSUPPORTED_REASONING_EFFORT";
+          throw error;
+        }
+        return config;
+      }
+    });
+    const agent = createAgent({
+      header: { provider: "parent-provider", model: "same-model", reasoningEffort: "high" }
+    });
+    const { tool, subagents } = setup({ llm, agent });
+
+    const result = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "parent-provider",
+      model: "same-model",
+      reasoning_effort: "max"
+    }, createExec({ agent }));
+
+    // `max` was rejected and the retry declared no default, so neither the rejected effort nor the
+    // unvalidated parent `high` may reach the child.
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toStrictEqual({ provider: "parent-provider", model: "same-model", reasoningEffort: undefined });
+    expect(result).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("keeps the parent effort when the route is inherited", async () => {
+    const llm = createLlm({ resolveCallConfig: async (config) => config });
+    const agent = createAgent({
+      header: { provider: "parent-provider", model: "parent-model", reasoningEffort: "high" }
+    });
+    const { tool, subagents } = setup({ llm, agent });
+
+    const result = await tool.execute({ description: "d", prompt: "p" }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toEqual({ provider: "parent-provider", model: "parent-model", reasoningEffort: "high" });
+    expect(result.reasoningEffort).toBe("high");
+  });
+
+  it("uses the model default for an omitted effort, not the parent effort", async () => {
+    const llm = createLlm({ resolveCallConfig: async (config) => ({ ...config, reasoningEffort: "low" }) });
+    const agent = createAgent({
+      header: { provider: "parent-provider", model: "parent-model", reasoningEffort: "high" }
+    });
+    const { tool, subagents } = setup({ llm, agent });
+
+    const result = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "other-provider",
+      model: "other-model"
+    }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toEqual({ provider: "other-provider", model: "other-model", reasoningEffort: "low" });
+    expect(result.reasoningEffort).toBe("low");
+  });
+
+  it("drops the parent effort when the route changed and none was requested", async () => {
+    const llm = createLlm({ resolveCallConfig: async (config) => config });
+    const agent = createAgent({
+      header: { provider: "parent-provider", model: "parent-model", reasoningEffort: "high" }
+    });
+    const { tool, subagents } = setup({ llm, agent });
+
+    const result = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "other-provider",
+      model: "other-model"
+    }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0].agentOptions)
+      .toEqual({ provider: "other-provider", model: "other-model" });
+    expect(result).not.toHaveProperty("reasoningEffort");
+  });
+  it("renders the effective effort alongside the child identity", () => {
+    const { tool } = setup();
+
+    expect(tool.output.render({}, {
+      kind: "activation",
+      subagentId: "child-1",
+      name: "verifier",
+      reasoningEffort: "high"
+    })).toEqual([{ type: "text", text: "started subagent verifier (child-1) on reasoning effort high" }]);
+  });
+
+  it.each(modes)("propagates the adapter failure before starting a child (inherit_context=$name)", async ({ args }) => {
+    const failure = new Error("unknown model");
+    const llm = createLlm({
+      resolveCallConfig: async () => { throw failure; }
+    });
+    const { tool, subagents, agent } = setup({ llm });
+
+    const thrown = await tool.execute({
       description: "d",
       prompt: "p",
       provider: "p",
       model: "missing",
       ...args
-    }, createExec({ agent }))).rejects.toThrow('model "missing" is not available on provider "p": unknown model');
+    }, createExec({ agent })).catch((error) => error);
+
+    expect(thrown).toBe(failure);
     expect(subagents.calls.startActivation).toHaveLength(0);
   });
 
+  it.each(modes)("rejects a model the provider does not advertise (inherit_context=$name)", async ({ args }) => {
+    const llm = createLlm({
+      providers: [{ id: "p", name: "p" }],
+      models: { p: [{ id: "real-model", name: "Real" }] }
+    });
+    const { tool, subagents, agent } = setup({ llm });
+
+    const thrown = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "p",
+      model: "p/real-model",
+      ...args
+    }, createExec({ agent })).catch((error) => error);
+
+    expect(thrown.message).toContain("`model` is not one of the ids provider");
+    expect(thrown.message).not.toContain("p/real-model");
+    expect(subagents.calls.startActivation).toHaveLength(0);
+  });
+
+  it.each(modes)("gives an unregistered provider an actionable message (inherit_context=$name)", async ({ args }) => {
+    const llm = createLlm({
+      resolveCallConfig: async () => {
+        const error = new Error("No adapter registered for provider nope");
+        error.code = "NO_ADAPTER";
+        throw error;
+      }
+    });
+    const { tool, subagents, agent } = setup({ llm });
+
+    const thrown = await tool.execute({
+      description: "d",
+      prompt: "p",
+      provider: "nope",
+      model: "m",
+      ...args
+    }, createExec({ agent })).catch((error) => error);
+
+    expect(thrown.code).toBe("NO_ADAPTER");
+    expect(thrown.message).toContain("is not registered on this host");
+    expect(thrown.message).toContain("list_subagent_routes");
+    expect(subagents.calls.startActivation).toHaveLength(0);
+  });
+
+  it("does not reserve a child id for an external backend", async () => {
+    // An external backend has no `prepareContinuable`, so the host rejects a reserved id. The
+    // delegation must leave it on the ordinary activation path instead of regressing it.
+    const subagents = createSubagents({
+      providers: {
+        "external-inherit": {
+          name: "external-inherit",
+          inheritsParentContext: true,
+          start: async () => ({}),
+          capabilities: { agentOptions: true }
+        }
+      }
+    });
+    // The configured inheriting backend is the external one, which is what the composition would
+    // point at when it does not ship a local fork.
+    const contextModes = {
+      fresh: { provider: "spawn", inheritsParentContext: false },
+      inherit: { provider: "external-inherit", inheritsParentContext: true }
+    };
+    const modelPin = { register: () => { throw new Error("must not reserve"); }, settle: () => false };
+    const { tool } = setup({ subagents, modelPin, contextModes });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m", inherit_context: true }, createExec({ agent: createAgent() }));
+
+    expect(subagents.calls.startActivation[0]).not.toHaveProperty("childId");
+  });
+
+  it("reserves a child id for a seeded local backend and reports the pinned route", async () => {
+    const registered = [];
+    const modelPin = {
+      register: (id, route) => registered.push({ id, route }),
+      // The created listener is what applies the selection, so a successful start settles true.
+      settle: () => true
+    };
+    const { tool, subagents, agent } = setup({ modelPin });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m", inherit_context: true }, createExec({ agent }));
+
+    expect(registered).toHaveLength(1);
+    expect(subagents.calls.startActivation[0].childId).toBe(registered[0].id);
+  });
+
+  it("does not reserve for a fresh child, which records no selection", async () => {
+    const modelPin = { register: () => { throw new Error("must not reserve"); }, settle: () => false };
+    const { tool, subagents, agent } = setup({ modelPin });
+
+    await tool.execute({ description: "d", prompt: "p", model: "m" }, createExec({ agent }));
+
+    expect(subagents.calls.startActivation[0]).not.toHaveProperty("childId");
+  });
+
+  it("fails and disposes a seeded child created without taking its pinned route", async () => {
+    const disposed = [];
+    const modelPin = { register: () => {}, settle: () => false };
+    const subagents = createSubagents();
+    subagents.startActivation = async (spec) => {
+      subagents.calls.startActivation.push(spec);
+      return { childId: "child-1", name: "agent-1", dispose: async () => { disposed.push("child-1"); } };
+    };
+    const { tool } = setup({ subagents, modelPin });
+
+    // The child is already live and may be working on the wrong route, so it must be stopped
+    // before the caller retries and leaves a second copy running.
+    await expect(tool.execute({ description: "d", prompt: "p", model: "m", inherit_context: true }, createExec({ agent: createAgent() })))
+      .rejects.toThrow("could not be confirmed on the route this call resolved");
+    expect(subagents.calls.startActivation).toHaveLength(1);
+    expect(disposed).toEqual(["child-1"]);
+  });
+
+  it("keeps the pin failure when disposal also fails", async () => {
+    const modelPin = { register: () => {}, settle: () => false };
+    const subagents = createSubagents();
+    subagents.startActivation = async (spec) => {
+      subagents.calls.startActivation.push(spec);
+      return {
+        childId: "child-1",
+        name: "agent-1",
+        dispose: async () => { throw new Error("teardown failed"); }
+      };
+    };
+    const { tool } = setup({ subagents, modelPin });
+
+    const thrown = await tool.execute({ description: "d", prompt: "p", model: "m", inherit_context: true }, createExec({ agent: createAgent() }))
+      .catch((error) => error);
+
+    expect(thrown.message).toContain("could not be confirmed on the route this call resolved");
+    // Termination was not confirmed, so the message must name the child and not suggest a retry.
+    expect(thrown.message).toContain("termination is unconfirmed rather than known");
+    expect(thrown.message).toContain("child-1");
+    expect(thrown.message).not.toContain("the call stopped it");
+    expect(thrown.cause?.message).toBe("teardown failed");
+  });
+
+  it("releases the reservation when the start fails", async () => {
+    const settled = [];
+    const modelPin = { register: () => {}, settle: (id) => { settled.push(id); return false; } };
+    const subagents = createSubagents();
+    subagents.startActivation = async () => { throw new Error("start refused"); };
+    const { tool } = setup({ subagents, modelPin });
+
+    await expect(tool.execute({ description: "d", prompt: "p", model: "m", inherit_context: true }, createExec({ agent: createAgent() })))
+      .rejects.toThrow("start refused");
+    expect(settled).toHaveLength(1);
+  });
   it("rejects a provider without a model", async () => {
     const { tool, subagents, agent } = setup();
 

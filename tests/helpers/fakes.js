@@ -202,14 +202,18 @@ export function createLlm({ providers = [], models = {}, details = {}, resolveCa
  */
 function defaultProviders() {
   return {
+    // Both shipped local backends declare `prepareContinuable`, which is what makes them local
+    // and therefore able to accept a reserved child id.
     spawn: {
       name: "spawn",
       inheritsParentContext: false,
+      prepareContinuable: async () => ({}),
       capabilities: { agentOptions: true, depthLimit: true }
     },
     fork: {
       name: "fork",
       inheritsParentContext: true,
+      prepareContinuable: async () => ({}),
       capabilities: { agentOptions: true, depthLimit: true }
     }
   };

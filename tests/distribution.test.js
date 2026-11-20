@@ -26,7 +26,7 @@ const requiredFiles = [
 describe("DSH distribution", () => {
   it("declares the bundle patch and supported host range", () => {
     expect(manifest.name).toBe("dsh-subagent-model");
-    expect(manifest.version).toBe("0.5.0");
+    expect(manifest.version).toBe("0.6.0");
     expect(manifest.dsh?.bundle?.patch).toBe("./cordis.patch.yml");
     expect(manifest.engines?.dsh).toBe(">=0.2.2-rc.1 <0.3.0");
   });

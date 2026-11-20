@@ -37,11 +37,15 @@ describe("buildActivationTask", () => {
       maxDepth: undefined
     });
 
-    expect(task).toEqual({
+    // `toEqual` treats a missing key and an `undefined` key as equal, so the effort override is
+    // asserted by ownership: it must be present and explicitly undefined to clear inheritance.
+    expect(task).toStrictEqual({
       prompt: [{ type: "text", text: "p" }],
       parent,
-      agentOptions: { provider: "p", model: "m" }
+      agentOptions: { provider: "p", model: "m", reasoningEffort: undefined }
     });
+    expect(Object.hasOwn(task.agentOptions, "reasoningEffort")).toBe(true);
+    expect(task.agentOptions.reasoningEffort).toBeUndefined();
     expect(task).not.toHaveProperty("maxDepth");
     expect(task).not.toHaveProperty("cwd");
   });

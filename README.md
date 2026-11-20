@@ -58,6 +58,13 @@ children keeps working.
 surface. That is a behavior change in the agent, not in stored data; disabling the plugin restores
 them on the next load.
 
+**Upgrading to 0.6.0 (breaking):** `list_subagent_routes` now returns the structured object shown
+below instead of text, and no longer accepts the `model` argument. A caller that parsed the old
+lines, or passed `provider` with `model` to read one model's efforts, must read `providers[].models[]`
+from a single response instead. The delegation tool's arguments are unchanged; its result gains the
+optional `reasoningEffort`. To roll back, downgrade to `0.5.0` or disable the plugin, which restores
+the native tools.
+
 ## Tools
 
 ### `list_subagent_routes`
@@ -66,12 +73,37 @@ Enumerates the LLM routes available for delegation.
 
 | Argument | Required | Meaning |
 | --- | --- | --- |
-| `provider` | no | Registered provider id; omit to list providers. |
-| `model` | no | Exact model id; requires `provider`. |
+| `provider` | no | Registered provider id; omit to list every provider. |
+
+Every call returns the same JSON shape, whether or not `provider` narrowed it:
+
+```json
+{
+  "providers": [
+    {
+      "provider": "claude",
+      "models": [
+        { "id": "claude-opus-5-5", "efforts": ["low", "medium", "high", "xhigh", "max"], "defaultEffort": "high" }
+      ]
+    }
+  ]
+}
+```
+
+Providers, models, and efforts are identified by **id alone**: no display names or descriptions are
+reported, and no combined `provider/model` route is printed. `efforts` is omitted for a model that
+exposes none, and `defaultEffort` only appears when the provider declares one.
+
+Pass `models[].id` to `subagent_model` exactly as written. `provider` and `model` are separate
+arguments; `model` is never a provider-prefixed route.
 
 Results are **not** filtered by the Session's authorized model list. That is deliberate: the
 plugin exists to route work to any model the host can reach, and this is the catalog to read before
 delegating to a different model.
+
+Efforts are read one model at a time from the provider, in parallel: about 0.6 s for a 15-model
+provider and about 1 s for every registered provider. A model whose metadata cannot be read keeps
+its entry without `efforts` rather than failing the response.
 
 ### `subagent_model`
 
@@ -82,19 +114,35 @@ Starts one managed subagent activation, optionally on an explicitly selected rou
 | `description` | yes | Short (3-5 word) task label shown in the transcript. |
 | `prompt` | yes | The task for the child. With `inherit_context: true`, build on the inherited turns; otherwise include everything it needs. |
 | `inherit_context` | no | When `true`, seed the child with this conversation's completed turns from the immediate caller. Defaults to `false` (fresh context). |
-| `model` | no | Model id from `list_subagent_routes`. Omit to run the child on the caller's current route. |
+| `model` | no | Model id taken verbatim from `list_subagent_routes`'s `models[].id`. It is the id alone, never a `provider/model` route. An id absent from a provider that advertises models is refused before a child starts. Omit to run the child on the caller's current route. |
 | `name` | no | Child name, unique among this agent's children: 1-32 lower-case letters, digits, or hyphens starting with a letter, other than `lead`. The host validates it and assigns `agent-N` when omitted. When a nested agent delegates, the reported name is that agent's slash-separated path to the child (for example `agent-1/verifier`), or the child session id when an ancestor is unnamed. |
-| `provider` | no | Provider id for `model`; supply it together with `model`, or omit both to inherit the caller's route. |
-| `reasoning_effort` | no | Model-specific effort id, validated against the model before the child starts. Requires `model`. |
+| `provider` | no | Provider id for `model`, separate from the model id; supply it together with `model`, or omit both to inherit the caller's route. |
+| `reasoning_effort` | no | Model-specific effort id from the model's `efforts`. Requires `model`. An effort the model does not offer is dropped and the model's default applies instead when the adapter declares one; the result reports the effort this call resolved and forwarded. When the route resolves no effort at all, the route carries none and the result omits the field, rather than inheriting the caller's effort that this call never validated. |
 | `cwd` | no | Child working directory; omitted inherits the caller's. |
 
-The call returns `{ kind: "activation", subagentId, name }` immediately, where `name` is the
-addressable name the host recorded for the child (see the `name` row). The transcript renders it as
-`started subagent <name> (<session id>)`. The child's answer arrives later as a completion notice in
+The call returns `{ kind: "activation", subagentId, name, reasoningEffort? }` immediately, where
+`name` is the addressable name the host recorded for the child (see the `name` row) and
+`reasoningEffort` is the effort this call resolved and forwarded, absent when the route declares
+none. For a child this host creates, that is the effort it runs with. For a backend that executes
+the child elsewhere, the host forwards the route without observing the external request, so a
+provider that applies its own default can differ; see the backend contract above.
+The transcript renders it as `started subagent <name> (<session id>)`, followed by
+`on reasoning effort <id>` when one applies. The child's answer arrives later as a completion notice in
 the parent conversation; use `send_message` with either the name or the session id to steer a
 running child or to continue it after it settles. Delegation depth is the Host's resolved limit
 (`ctx.subagents.resolveMaxDepth()`), forwarded with each request; the plugin applies no cap of its
 own.
+
+#### Model id validation
+
+A supplied `model` is checked against the models its provider advertises. The check is skipped for a
+provider that advertises no models at all (for example a local runtime with no catalog), because
+nothing can decide the call there and refusing would break a route that may work.
+
+One consequence is worth knowing: a model the user disabled in the provider adapter's own
+configuration is not advertised, so it is refused here even though the provider itself could run
+it. That is the accepted cost of catching a mistyped or provider-prefixed id before a child starts.
+
 
 Both tools declare `additionalProperties: false`, so an argument the schema does not declare fails
 the call instead of being silently ignored.
@@ -143,6 +191,24 @@ default to the names DSH ships:
 A composition that renames its providers sets these instead of relying on the defaults. A name with
 no registered provider fails loud at call time, naming the requested backend, the context mode, and
 the key that selects it. Unknown keys are rejected rather than ignored.
+
+A backend that declares `prepareContinuable` runs the child locally; the host calls those *local*
+backends. Only a local backend can be pinned to a route:
+
+- **Local backend** (the shipped `spawn` and `fork`): an inheriting child is seeded with the
+  parent completed turns, including the parent request header. The host prefers a recorded
+  selection over the creation options, so the plugin reserves the child identity and applies the
+  resolved route through `agent.model.select` before the first request. Without that, a forked
+  child would silently run the caller model and effort.
+- **External backend** (no `prepareContinuable`, for example a separate-process agent): the host
+  rejects a reserved child identity, so the plugin reserves nothing and leaves the call on the
+  ordinary activation path, forwarding the resolved route as `agentOptions`. Execution belongs to
+  the external provider: this host does not observe or enforce the request it eventually makes, and
+  a separate runtime may apply its own defaults. The delegation result therefore describes the
+  route this plugin resolved and forwarded, not an independently observed external request.
+
+If a local backend is handed a seeded child that the host refuses to pin, the call fails loudly
+rather than reporting a route the child does not run.
 
 ## Requirements
 
@@ -200,6 +266,12 @@ is started and recorded with a continuable descriptor in the requested directory
 mask, the lane applies a profile overlay that turns on the native `modelSelection` and
 `modelDiscovery` fields, which is the composition that made cross-model delegation fail after DSH
 0.2.2.
+
+A second pass adopts the recorded parent session with `--session-id` and delegates with
+`inherit_context: true`, asking for a model the parent does not use. That child is *seeded*: its log
+starts with the parent request header, and the host prefers a recorded selection over the creation
+options. The pass asserts the child own request header matches the route the tool result reported,
+which is what catches a forked child silently running the parent route.
 
 The lane needs a host that provides the flattened activation spec, so it does not default to the
 installed desktop runtime:

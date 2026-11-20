@@ -18,6 +18,7 @@ import { createCatalogTool } from "./lib/catalog.js";
 import { resolveConfig } from "./lib/config.js";
 import { createDelegationTool } from "./lib/delegation.js";
 import { installGuidance } from "./lib/guidance.js";
+import { installModelPin } from "./lib/model-pin.js";
 import { installNativeMask } from "./lib/native-mask.js";
 
 const name = "subagent-model";
@@ -49,11 +50,16 @@ function apply(ctx, config) {
     guidance.dispose();
     mask.dispose();
   }, "subagent-model: native mask and guidance");
+  // A seeded child carries the parent model selection, so the resolved child route is pinned
+  // by identity at `agent/created`, before the host releases the child queued work.
+  const modelPin = installModelPin({ events: ctx });
+  ctx.effect(() => () => modelPin.dispose(), "subagent-model: child model pin");
 
   ctx.tools.register(createCatalogTool(ctx.llm));
   ctx.tools.register(createDelegationTool({
     llm: ctx.llm,
     subagents: ctx.subagents,
+    modelPin,
     contextModes
   }));
 }

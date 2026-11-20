@@ -23,10 +23,12 @@ describe("resolveContextBackend", () => {
   it("resolves the default backend for each mode", () => {
     const subagents = createSubagents();
 
+    // A local backend declares `prepareContinuable`, which is what allows a reserved child id and
+    // therefore what decides whether the resolved route can be pinned.
     expect(resolveContextBackend({ subagents, inheritContext: false }))
-      .toEqual({ mode: "fresh", provider: "spawn" });
+      .toEqual({ mode: "fresh", provider: "spawn", pinnable: true });
     expect(resolveContextBackend({ subagents, inheritContext: true }))
-      .toEqual({ mode: "inherit", provider: "fork" });
+      .toEqual({ mode: "inherit", provider: "fork", pinnable: true });
     expect(subagents.calls.getProvider).toEqual(["spawn", "fork"]);
     expect(subagents.calls.startActivation).toHaveLength(0);
   });
@@ -46,9 +48,31 @@ describe("resolveContextBackend", () => {
       inherit: { provider: "fork", inheritsParentContext: true }
     };
 
+    // This backend declares no `prepareContinuable`, so it is external: the host would reject a
+    // reserved child id, and the delegation must leave it on the ordinary activation path.
     expect(resolveContextBackend({ subagents, inheritContext: false, modes }))
-      .toEqual({ mode: "fresh", provider: "custom-fresh" });
+      .toEqual({ mode: "fresh", provider: "custom-fresh", pinnable: false });
     expect(subagents.calls.getProvider).toEqual(["custom-fresh"]);
+  });
+
+  it("reports a local backend as pinnable and an external one as not", () => {
+    const subagents = createSubagents({
+      providers: {
+        "external-inherit": {
+          name: "external-inherit",
+          inheritsParentContext: true,
+          start: async () => ({}),
+          capabilities: { agentOptions: true }
+        }
+      }
+    });
+    const modes = {
+      fresh: { provider: "spawn", inheritsParentContext: false },
+      inherit: { provider: "external-inherit", inheritsParentContext: true }
+    };
+
+    expect(resolveContextBackend({ subagents, inheritContext: false, modes }).pinnable).toBe(true);
+    expect(resolveContextBackend({ subagents, inheritContext: true, modes }).pinnable).toBe(false);
   });
 
   it("rejects a missing fresh backend", () => {

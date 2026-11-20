@@ -42,7 +42,14 @@ const RUN_TIMEOUT_MS = 120_000;
 const TOOL_NAME = "list_subagent_routes";
 const DELEGATION_TOOL_NAME = "subagent_model";
 /** Route the scripted delegation asks for; the throwaway profile serves it from the stub. */
+const PROVIDER = "deepseek-official";
 const CHILD_MODEL = "deepseek-flash";
+/** Model the seeded lane requests; it must differ from the parent route for the check to bite. */
+const SEEDED_CHILD_MODEL = "deepseek-v4-pro";
+/** Effort the seeded lane requests; the parent runs `high`, so this must not be `high`. */
+const SEEDED_CHILD_EFFORT = "max";
+/** Child name the seeded lane requests. */
+const SEEDED_CHILD_NAME = "smoke-seeded";
 /** Child name the scripted delegation requests, unique among the calling agent's children. */
 const CHILD_NAME = "smoke-child";
 /** Host delegation tools the plugin must hide from the model-facing catalog. */
@@ -146,6 +153,36 @@ function runDsh(host, args, env, cwd) {
 }
 
 /**
+ * Run one CLI pass to completion and capture its output.
+ * @param {object} host - resolved runtime from {@link resolveHost}.
+ * @param {object} options - run inputs.
+ * @param {string[]} options.args - arguments after the profile flags.
+ * @param {Record<string, string>} options.env - child environment.
+ * @param {string} options.cwd - working directory.
+ * @param {string} [options.overlay] - profile patch to apply.
+ * @returns {Promise<{ code: number|null, stdout: string, stderr: string }>} the finished run.
+ */
+async function runOnce(host, { args, env, cwd, overlay }) {
+  const overlayArgs = overlay === undefined ? [] : ["--patch", overlay];
+  return await new Promise((resolve) => {
+    const child = spawn(host.command, [...host.prefix, "--profile", PROFILE, ...overlayArgs, ...args], { env, cwd: host.cwd ?? cwd });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), RUN_TIMEOUT_MS);
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: null, stdout, stderr: stderr + "\nspawn error: " + String((error && error.message) || error) });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+/**
  * Append one SSE frame.
  * @param {import('node:http').ServerResponse} response - open response.
  * @param {Record<string, unknown>} payload - event payload; its `type` names the frame.
@@ -220,14 +257,20 @@ function parseBody(body) {
 
 /**
  * Start the local Messages-API stub.
- * @param {{ delegation: boolean, mask: boolean, workspace: string }} options - whether to script a delegation, whether to probe a masked tool, and the child directory to request.
+ * @param {object} options - stub lane selection.
+ * @param {boolean} options.delegation - script a real delegation.
+ * @param {boolean} options.mask - probe the masked native tools.
+ * @param {boolean} [options.seeded] - request an inheriting child on a resumed turn.
+ * @param {string} options.workspace - child directory to request.
  * @returns {Promise<{ port: number, requests: string[], systemBody: () => string, close: () => Promise<void> }>}
  */
-async function startStub({ delegation, mask, workspace }) {
+async function startStub({ delegation, mask, seeded = false, workspace }) {
   const requests = [];
   let catalogRequested = false;
   let catalogBody;
   let parentSteps = 0;
+  /** Route the scripted delegation asked for, reported so a lane can assert it. */
+  let scriptedRoute;
   const server = createServer((request, response) => {
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
@@ -255,11 +298,40 @@ async function startStub({ delegation, mask, workspace }) {
         respondWithText(response, "SMOKE_AUXILIARY_TURN");
         return;
       }
+      if (seeded) {
+        // The resumed pass already carries the first pass tool results in its history, so step
+        // counting cannot plan it. It scripts exactly one thing: the inheriting delegation.
+        if (scriptedRoute === undefined) {
+          scriptedRoute = {
+            provider: PROVIDER,
+            model: SEEDED_CHILD_MODEL,
+            reasoningEffort: SEEDED_CHILD_EFFORT
+          };
+          respondWithToolCall(response, "toolu_delegate", DELEGATION_TOOL_NAME, {
+            description: "probe seeded child route",
+            prompt: "Reply with the smoke result and use no tools.",
+            model: SEEDED_CHILD_MODEL,
+            reasoning_effort: SEEDED_CHILD_EFFORT,
+            name: SEEDED_CHILD_NAME,
+            inherit_context: true,
+            cwd: workspace
+          });
+          return;
+        }
+        respondWithText(response, "SMOKE_TURN_COMPLETE");
+        return;
+      }
       if (body.includes('"tool_result"')) {
         parentSteps += 1;
         const plan = [];
-        if (mask) plan.push(...MASKED_PROBES.map((name) => "probe:" + name));
-        if (delegation) plan.push("delegate", "undeclared");
+        if (seeded) {
+          // The resumed pass inherits the first pass tool results, so it must script only the
+          // delegation it is meant to observe.
+          plan.push("delegate");
+        } else {
+          if (mask) plan.push(...MASKED_PROBES.map((name) => "probe:" + name));
+          if (delegation) plan.push("delegate", "undeclared");
+        }
         const action = plan[parentSteps - 1];
         if (action === undefined) {
           respondWithText(response, "SMOKE_TURN_COMPLETE");
@@ -275,11 +347,18 @@ async function startStub({ delegation, mask, workspace }) {
           return;
         }
         if (action === "delegate") {
+          // The seeded lane asks for a model the parent does not use, so a child that silently
+          // inherits the parent route cannot satisfy the assertion by accident.
+          const requestedModel = seeded ? SEEDED_CHILD_MODEL : CHILD_MODEL;
+          scriptedRoute = { provider: PROVIDER, model: requestedModel };
           respondWithToolCall(response, "toolu_delegate", DELEGATION_TOOL_NAME, {
             description: "probe child route",
             prompt: "Reply with the smoke result and use no tools.",
-            model: CHILD_MODEL,
+            model: requestedModel,
             name: CHILD_NAME,
+            // Inheriting context is what makes the child seeded, so its route must hold against
+            // the parent request header the seed carries.
+            ...(seeded ? { inherit_context: true } : {}),
             cwd: workspace
           });
           return;
@@ -309,6 +388,7 @@ async function startStub({ delegation, mask, workspace }) {
     requests,
     /** The request body that first advertised the plugin catalog; it carries the system prompt. */
     systemBody: () => catalogBody ?? "",
+    scriptedRoute: () => scriptedRoute,
     close: () => new Promise((resolve) => server.close(() => resolve()))
   };
 }
@@ -422,6 +502,8 @@ function fail(detail, context = []) {
  * @param {boolean} [options.isolatedEnvironment] - boot with a minimal environment.
  * @param {boolean} [options.delegation] - script a real `subagent_model` call; requires a host with the flattened spec.
  * @param {boolean} [options.mask] - compose the native route fields and assert the plugin hides them.
+ * @param {boolean} [options.seededFork] - delegate with inherited context on a resumed turn and
+ *   assert the seeded child runs on the route the tool result reported.
  * @returns {Promise<void>}
  */
 export async function runSmoke({
@@ -430,7 +512,8 @@ export async function runSmoke({
   keep = Boolean(process.env.SMOKE_KEEP),
   isolatedEnvironment = false,
   delegation = false,
-  mask = delegation
+  mask = delegation,
+  seededFork = false
 } = {}) {
   if (mask && !delegation) {
     throw new Error("smoke: the mask lane probes a real delegation, so it requires delegation: true");
@@ -475,25 +558,11 @@ export async function runSmoke({
       DEEPSEEK_BASE_URL: "http://127.0.0.1:" + stub.port,
       DEEPSEEK_API_KEY: "smoke-key"
     };
-    const run = await new Promise((resolve) => {
-      const overlayArgs = overlay === undefined ? [] : ["--patch", overlay];
-      const child = spawn(host.command, [...host.prefix, "--profile", PROFILE, ...overlayArgs, "Reply with the smoke result."], {
-        env: runEnv,
-        cwd: host.cwd ?? home
-      });
-      let stdout = "";
-      let stderr = "";
-      const timer = setTimeout(() => child.kill("SIGKILL"), RUN_TIMEOUT_MS);
-      child.stdout.on("data", (chunk) => { stdout += chunk; });
-      child.stderr.on("data", (chunk) => { stderr += chunk; });
-      child.on("error", (error) => {
-        clearTimeout(timer);
-        resolve({ code: null, stdout, stderr: stderr + "\nspawn error: " + String((error && error.message) || error) });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({ code, stdout, stderr });
-      });
+    const run = await runOnce(host, {
+      args: ["Reply with the smoke result."],
+      env: runEnv,
+      cwd: home,
+      overlay
     });
     await stub.close();
 
@@ -506,11 +575,66 @@ export async function runSmoke({
       ]);
     }
 
-    const sessionFiles = findSessionFiles(home);
-    if (sessionFiles.length === 0) {
+    // The first pass is asserted on its own: the second pass adopts the same parent session and
+    // appends to it, so its events must be snapshotted before that run starts.
+    const firstRunSessions = findSessionFiles(home).map(readSessionEvents);
+
+    // A seeded child only exists once the parent has a completed turn, which one shot cannot
+    // produce. A second run adopts the recorded parent session and delegates with inheritance,
+    // so the child really receives the parent request header through its seed.
+    let seededRun;
+    let seededRoute;
+    let seededReceipt;
+    let seededParentEffort;
+    if (seededFork) {
+      const parent = firstRunSessions.find((session) => session[0]?.type === "session"
+        && session[0].origin !== "subagent");
+      if (parent === undefined) fail("the seeded lane could not find the parent session to resume");
+      const parentId = parent[0].id;
+      const seededStub = await startStub({ delegation: true, mask, seeded: true, workspace });
+      try {
+        seededRun = await runOnce(host, {
+          args: ["--session-id", parentId, "Reply with the smoke result."],
+          env: { ...runEnv, DEEPSEEK_BASE_URL: "http://127.0.0.1:" + seededStub.port },
+          cwd: home,
+          overlay
+        });
+        seededRoute = seededStub.scriptedRoute();
+      } finally {
+        await seededStub.close();
+      }
+      if (seededRun.code !== 0) {
+        fail("the seeded fork lane did not complete", [
+          seededRun.stdout.slice(-2000),
+          seededRun.stderr.slice(-2000)
+        ]);
+      }
+      // The receipt must come from the resumed parent session, not from any child log: the parent
+      // log is the only place this tool call is recorded.
+      const resumedSessions = findSessionFiles(home).map(readSessionEvents);
+      const resumedParent = resumedSessions.find((session) => session[0]?.type === "session"
+        && session[0].origin !== "subagent");
+      if (resumedParent === undefined) fail("the seeded pass recorded no parent session");
+      const resumedResults = resultsForTool(resumedParent, DELEGATION_TOOL_NAME);
+      const acceptedReceipts = resumedResults.filter((message) => message.isError === false);
+      if (acceptedReceipts.length === 0) {
+        fail("the seeded parent session recorded no accepted " + DELEGATION_TOOL_NAME + " result");
+      }
+      const receiptText = contentText(acceptedReceipts.at(-1));
+      const receiptMatch = /^started subagent (.+) \(([0-9a-fA-F-]{36})\)(?: on reasoning effort (.+))?$/.exec(receiptText.trim());
+      if (receiptMatch === null) {
+        fail("the seeded delegation result does not report the child identity and effort", [receiptText.slice(0, 500)]);
+      }
+      seededReceipt = { id: receiptMatch[2], effort: receiptMatch[3] };
+      // The parent effort is what an unpinned seeded child would keep, so it is the negative control.
+      seededParentEffort = resumedParent.filter((event) => event.type === "request/header")
+        .at(-1)?.data.header.config.reasoningEffort;
+    }
+
+    const sessions = firstRunSessions;
+    if (sessions.length === 0) {
       fail("no session log (session.v4.jsonl[.zstd]) was persisted under the throwaway home");
     }
-    const sessions = sessionFiles.map(readSessionEvents);
     const events = sessions.flat();
     if (process.env.SMOKE_DEBUG) {
       console.log("session event types:", [...new Set(events.map((event) => event.type))].join(", "));
@@ -589,9 +713,31 @@ export async function runSmoke({
       && event.data.message?.toolCallId === catalogCall.data.callId);
     if (catalogResult === undefined) fail("the " + TOOL_NAME + " call produced no recorded result");
     if (catalogResult.data.message.isError !== false) fail("the " + TOOL_NAME + " call failed");
-    const resultText = JSON.stringify(catalogResult.data.message.content);
-    if (!resultText.includes("deepseek-official")) {
+    // The catalog answers a structured value; read it rather than matching rendered text.
+    const resultText = (catalogResult.data.message.content ?? [])
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("");
+    let catalog;
+    try {
+      catalog = JSON.parse(resultText);
+    } catch {
+      fail("the " + TOOL_NAME + " result is not JSON", [resultText.slice(0, 500)]);
+    }
+    if (!Array.isArray(catalog?.providers)) {
+      fail("the " + TOOL_NAME + " result has no providers array", [resultText.slice(0, 500)]);
+    }
+    const entry = catalog.providers.find((provider) => provider.provider === "deepseek-official");
+    if (entry === undefined) {
       fail("the " + TOOL_NAME + " result does not list the registered provider", [resultText.slice(0, 500)]);
+    }
+    if (!Array.isArray(entry.models) || entry.models.length === 0) {
+      fail("the " + TOOL_NAME + " result lists no models for the registered provider", [resultText.slice(0, 500)]);
+    }
+    if (entry.models.some((model) => typeof model.id !== "string" || model.id.length === 0)) {
+      fail("the " + TOOL_NAME + " result reports a model without an id", [JSON.stringify(entry).slice(0, 500)]);
+    }
+    if (resultText.includes("deepseek-official/") || resultText.includes(" — ")) {
+      fail("the " + TOOL_NAME + " result renders a display name or combined route", [resultText.slice(0, 500)]);
     }
     if (resultsForTool(events, TOOL_NAME).length !== 1) {
       fail("expected exactly one " + TOOL_NAME + " result, saw " + resultsForTool(events, TOOL_NAME).length);
@@ -609,7 +755,8 @@ export async function runSmoke({
       const started = (accepted.content ?? [])
         .map((block) => block.type === "text" ? block.text : "")
         .join(" ");
-      const startMatch = /^started subagent (.+) \(([0-9a-fA-F-]{36})\)$/.exec(started.trim());
+      // The render may append the effective reasoning effort after the child identity.
+      const startMatch = /^started subagent (.+) \(([0-9a-fA-F-]{36})\)(?: on reasoning effort .+)?$/.exec(started.trim());
       if (startMatch === null) {
         fail("the " + DELEGATION_TOOL_NAME + " result does not report the child name and id", [started.slice(0, 500)]);
       }
@@ -651,9 +798,83 @@ export async function runSmoke({
       }
     }
 
-    console.log("smoke ok: " + sessionFiles.length + " session(s), both tools registered"
+    if (seededFork) {
+      // The seeded child carries the parent request header in its seed, so this lane proves the
+      // forked child really runs the route the tool result reported rather than the parent's.
+      const seededSessions = findSessionFiles(home).map(readSessionEvents);
+      if (seededReceipt === undefined) fail("the seeded delegation produced no recorded result");
+      // Identify the child by the id the receipt reported, not by guessing from its model.
+      const seededChild = seededSessions.find((session) => session[0]?.type === "session"
+        && session[0].origin === "subagent"
+        && session[0].id === seededReceipt.id);
+      if (seededChild === undefined) {
+        fail("no child session matches the reported id " + seededReceipt.id);
+      }
+      if (seededChild[0].isSeeded !== true) {
+        fail("the reported child is not seeded, so the lane proves nothing about a forked child");
+      }
+      // The host writes a durable `session/end-seed` marker with `inherited: true` at the exact
+      // seed boundary, so the child own FIRST request is the first header after it. Using the last
+      // header instead would accept a child that started on the wrong route and switched later.
+      const seedEnd = seededChild.findIndex((event) => event.type === "session/end-seed"
+        && event.data?.inherited === true);
+      if (seedEnd === -1) {
+        fail("the seeded child recorded no inherited session/end-seed marker", [
+          "event types: " + [...new Set(seededChild.map((event) => event.type))].join(", ")
+        ]);
+      }
+      const headers = seededChild.filter((event) => event.type === "request/header");
+      const seededInherited = headers.find((event) => event.seq < seededChild[seedEnd].seq);
+      if (seededInherited === undefined) {
+        fail("the seeded child log holds no inherited request header, so the lane proves nothing");
+      }
+      if (seededInherited.data.header.config.model === seededRoute?.model) {
+        fail("the inherited header already carried the requested model, so the lane proves nothing", [
+          "inherited header: " + JSON.stringify(seededInherited.data.header.config)
+        ]);
+      }
+      const ownHeaderEvent = headers.find((event) => event.seq > seededChild[seedEnd].seq);
+      if (ownHeaderEvent === undefined) {
+        fail("the seeded child recorded no request header of its own after the seed boundary");
+      }
+      const ownHeader = ownHeaderEvent.data.header.config;
+      if (seededRoute === undefined) fail("the seeded lane never scripted a delegation route");
+      if (ownHeader.provider !== seededRoute.provider || ownHeader.model !== seededRoute.model) {
+        fail("the seeded child ran on " + ownHeader.provider + "/" + ownHeader.model
+          + " instead of the reported " + seededRoute.provider + "/" + seededRoute.model, [
+          "second pass stdout: " + (seededRun?.stdout ?? "").slice(-1500),
+          "second pass stderr: " + (seededRun?.stderr ?? "").slice(-1500)
+        ]);
+      }
+      // The parent runs an effort of its own, so an inheriting child proves the pin only when its
+      // effort differs from the parent and matches what the result reported.
+      if (seededReceipt.effort === undefined) {
+        fail("the seeded delegation reported no reasoning effort");
+      }
+      if (ownHeader.reasoningEffort !== seededReceipt.effort) {
+        fail("the seeded child ran effort " + String(ownHeader.reasoningEffort)
+          + " but the result reported " + seededReceipt.effort);
+      }
+      // Both must be exactly what the call asked for: matching each other while both drifted to a
+      // different supported effort is still a route the caller did not request.
+      if (ownHeader.reasoningEffort !== SEEDED_CHILD_EFFORT) {
+        fail("the seeded child ran effort " + String(ownHeader.reasoningEffort)
+          + " instead of the requested " + SEEDED_CHILD_EFFORT);
+      }
+      if (seededReceipt.effort !== SEEDED_CHILD_EFFORT) {
+        fail("the seeded delegation reported effort " + String(seededReceipt.effort)
+          + " instead of the requested " + SEEDED_CHILD_EFFORT);
+      }
+      if (ownHeader.reasoningEffort === seededParentEffort) {
+        fail("the seeded child inherited the parent effort " + String(seededParentEffort)
+          + ", so the result would be reporting a route the child does not run");
+      }
+    }
+
+    console.log("smoke ok: " + sessions.length + " session(s), both tools registered"
       + (delegation ? ", delegation started with the flattened activation spec" : " and the catalog executed")
-      + (mask ? ", native delegation surface masked" : ""));
+      + (mask ? ", native delegation surface masked" : "")
+      + (seededFork ? ", seeded child ran on the requested route" : ""));
     if (keep) console.log("kept session home: " + home);
   } finally {
     await stub?.close();
@@ -662,7 +883,7 @@ export async function runSmoke({
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  runSmoke({ delegation: true }).catch((error) => {
+  runSmoke({ delegation: true, seededFork: true }).catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });
